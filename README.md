@@ -4,21 +4,34 @@
 
 ObtainX is a fork of Obtainium. These are the extra features you get in this fork:
 
-- **Installer choice** - Added a new **Legacy** install path. It sends APKs to another installer you pick (e.g. InstallerX, App Manager). Useful when you cannot grant "install unknown apps" permission (e.g. when _Advanced Protection_ is enabled) to noarmal apps but another privileged installer can still install.
+- **📦 Installer choice** - Added a new **Legacy** install path. It sends APKs to any installer you choose (e.g. InstallerX, App Manager). Useful when you cannot grant "install unknown apps" to normal apps (e.g. when _Advanced Protection_ is enabled) but a privileged installer can still do the job.
 
-- **More Material UI** - Different parts of the app has been given some more Material UI love, with grouping in cards, slide up panels, expressive buttons, auto-hide menu bars, and small visual consistency tweaks. 
+- **🎨 Material 3 Expressive Makeover** - Different parts of the app has been overhauled with Material 3 Expressive design, with grouping in cards, slide up panels, fluid animations, expressive buttons, auto-hide menu bars, and visual consistency tweaks. 
 
-- **Better handling of Track-only sources (e.g. APKMirror)** 
-  - Shows installed version from the device when the package ID is known; 
-  - New **Update** button opens the concrete release page, not only the app listing. 
+- **🎨 Per-app color theming** - Each app's detail page derives its entire color scheme from the app's own icon. Enable *Match app page to icon colors* in Settings to see every app rendered in its own palette - deep, accurate, and dark-mode-safe.
+
+- **🖼️ Custom app icons** - Not happy with an app's icon or a blank placeholder? Tap the icon on any app's detail page to set your own - pick from your gallery or grab one from the web.
+
+- **👆 Configurable swipe gestures** - Left and right swipe actions are independently configurable. Choose from Update, Install, Pin, Edit, Delete, Open, App Info, or None. A color-coded icon hint appears during the drag so you always know what will happen.
+
+- **🔍 Collapsible inline search** - A search icon sits next to the **Apps** header. Tap it and a full-width search field slides open with the keyboard ready. See the app list filter live while you type. 
+
+- **🔖 Active filter chips** - A pinned row of dismissible chips lives just below the toolbar, showing every active non-text filter (category, pinned, installed state, etc.). Tap any chip to instantly clear that filter. The row disappears entirely when nothing is filtered.
+
+- **🏷️ Source favicon badges** - Every app row shows a tiny favicon badge identifying where the app comes from - GitHub, GitLab, F-Droid, APKMirror, and more - without opening the app.
+
+- **↩️ Reliable undo after delete** - Swipe-to-delete and bulk-delete both show a 5-second **Undo** snackbar. Tap it and the app is fully restored.
+
+- **🏪 Check other sources** - Other store shortcut chips on the app page.
+
+- **🔭 Better handling of Track-only sources (e.g. APKMirror)** 
+  - Shows the installed version from the device when the package ID is known. 
+  - New **Update** button opens the concrete release page, not just the app listing. 
   - Fewer wrong package IDs when adding from APKMirror. 
-  - If the installed version cannot be determined, a dedicated error section explains it and you can **fix the package ID** from the app page.
+  - If the installed version cannot be determined, a dedicated section explains why and lets you **fix the package ID** from the app page.
 
-- **Organized App detail layout** 
-  - Repalced plaintext heavy app page with Card-style sections (Hero, Versions, Details etc.), clearer grouping & hierarchy, Material 3 surfaces, and consistent treatment of links and timestamps.
-  - **Other sources** - Other store shortcut chips on the app page.
 
-- **Smarter version handling** - Fewer false "update available" / "up to date" states when your installed build and the source label differ in harmless ways (including dev vs release labels).
+- **🧠 Smarter version handling** - Fewer false "update available" / "up to date" states when your installed build and the source label differ in harmless ways (including dev vs release labels).
 
 ## Screenshots
 | <img src="./assets/screenshots/1.apps.webp" alt="All Apps Page" /> | <img src="./assets/screenshots/2.view_opts.webp" alt="Themes and View Options" /> | <img src="./assets/screenshots/3.filters.webp" alt="Live Filters" /> | 
