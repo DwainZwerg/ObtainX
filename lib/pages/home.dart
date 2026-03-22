@@ -80,12 +80,12 @@ class _HomePageState extends State<HomePage> {
                   GestureDetector(
                     onTap: () {
                       launchUrlString(
-                        'https://github.com/ImranR98/Obtainium/blob/main/README.md',
+                        'https://github.com/bikram-agarwal/ObtainX/blob/main/README.md',
                         mode: LaunchMode.externalApplication,
                       );
                     },
                     child: Text(
-                      'https://github.com/ImranR98/Obtainium/blob/main/README.md',
+                      'https://github.com/bikram-agarwal/ObtainX/blob/main/README.md',
                       style: const TextStyle(
                         decoration: TextDecoration.underline,
                         fontWeight: FontWeight.bold,
@@ -156,28 +156,36 @@ class _HomePageState extends State<HomePage> {
   Future<void> initDeepLinks() async {
     _appLinks = AppLinks();
 
+    /// Waits for [key.currentState] to become non-null by checking once per
+    /// frame instead of busy-looping with microsecond delays.
+    Future<T> waitForState<T extends State>(GlobalKey<T> key) {
+      if (key.currentState != null) return Future.value(key.currentState!);
+      final completer = Completer<T>();
+      void check(Duration _) {
+        if (key.currentState != null) {
+          completer.complete(key.currentState!);
+        } else {
+          WidgetsBinding.instance.addPostFrameCallback(check);
+        }
+      }
+      WidgetsBinding.instance.addPostFrameCallback(check);
+      return completer.future;
+    }
+
     goToAddApp(String data) async {
       switchToPage(1);
-      while ((pages[1].widget.key as GlobalKey<AddAppPageState>?)
-              ?.currentState ==
-          null) {
-        await Future.delayed(const Duration(microseconds: 1));
-      }
-      (pages[1].widget.key as GlobalKey<AddAppPageState>?)?.currentState
-          ?.linkFn(data);
+      final state = await waitForState(
+          pages[1].widget.key as GlobalKey<AddAppPageState>);
+      state.linkFn(data);
     }
 
     goToExistingApp(String appId) async {
       // Go to Apps page
       switchToPage(0);
-      while ((pages[0].widget.key as GlobalKey<AppsPageState>?)?.currentState ==
-          null) {
-        await Future.delayed(const Duration(microseconds: 1));
-      }
-
+      final state = await waitForState(
+          pages[0].widget.key as GlobalKey<AppsPageState>);
       // Navigate to the app
-      (pages[0].widget.key as GlobalKey<AppsPageState>?)?.currentState
-          ?.openAppById(appId);
+      state.openAppById(appId);
     }
 
     interpretLink(Uri uri) async {
@@ -311,19 +319,29 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    AppsProvider appsProvider = context.watch<AppsProvider>();
+    // Only the app-count, loading flag, and update count are needed here;
+    // using select() avoids rebuilding the home scaffold on every
+    // download-progress notification.
+    final (int appsCount, bool isLoading, int updateCount) =
+        context.select<AppsProvider, (int, bool, int)>(
+      (p) => (
+        p.apps.length,
+        p.loadingApps,
+        p.findExistingUpdates(installedOnly: true).length,
+      ),
+    );
     SettingsProvider settingsProvider = context.watch<SettingsProvider>();
 
     if (!prevIsLoading &&
         prevAppCount >= 0 &&
-        appsProvider.apps.length > prevAppCount &&
+        appsCount > prevAppCount &&
         selectedIndexHistory.isNotEmpty &&
         selectedIndexHistory.last == 1 &&
         !isLinkActivity) {
       switchToPage(0);
     }
-    prevAppCount = appsProvider.apps.length;
-    prevIsLoading = appsProvider.loadingApps;
+    prevAppCount = appsCount;
+    prevIsLoading = isLoading;
 
     return WillPopScope(
       child: Scaffold(
@@ -356,9 +374,18 @@ class _HomePageState extends State<HomePage> {
         ),
         bottomNavigationBar: NavigationBar(
           destinations: pages
+              .asMap()
+              .entries
               .map(
-                (e) =>
-                    NavigationDestination(icon: Icon(e.icon), label: e.title),
+                (entry) => NavigationDestination(
+                  icon: entry.key == 0 && updateCount > 0
+                      ? Badge(
+                          label: Text(updateCount.toString()),
+                          child: Icon(entry.value.icon),
+                        )
+                      : Icon(entry.value.icon),
+                  label: entry.value.title,
+                ),
               )
               .toList(),
           onDestinationSelected: (int index) async {

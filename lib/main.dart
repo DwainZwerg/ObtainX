@@ -59,6 +59,7 @@ const localeDir = 'assets/translations';
 var fdroid = false;
 
 final globalNavigatorKey = GlobalKey<NavigatorState>();
+final scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
 
 Future<void> loadTranslations() async {
   // See easy_localization/issues/210
@@ -311,8 +312,8 @@ class _ObtainiumState extends State<Obtainium> {
     } else {
       bool isFirstRun = settingsProvider.checkAndFlipFirstRun();
       if (isFirstRun) {
-        logs.add('This is the first ever run of Obtainium.');
-        // If this is the first run, add Obtainium to the Apps list
+        logs.add('This is the first ever run of ObtainX.');
+        // If this is the first run, add ObtainX to the Apps list
         if (!fdroid) {
           getInstalledInfo(obtainiumId)
               .then((value) {
@@ -321,8 +322,8 @@ class _ObtainiumState extends State<Obtainium> {
                     App(
                       obtainiumId,
                       obtainiumUrl,
-                      'ImranR98',
-                      'Obtainium',
+                      'Bikram-Agarwal',
+                      'ObtainX',
                       value!.versionName,
                       value.versionName!,
                       [],
@@ -405,11 +406,12 @@ class _ObtainiumState extends State<Obtainium> {
           }
 
           return MaterialApp(
-            title: 'Obtainium',
+            title: 'ObtainX',
             localizationsDelegates: context.localizationDelegates,
             supportedLocales: context.supportedLocales,
             locale: context.locale,
             navigatorKey: globalNavigatorKey,
+            scaffoldMessengerKey: scaffoldMessengerKey,
             debugShowCheckedModeBanner: false,
             theme: ThemeData(
               useMaterial3: true,

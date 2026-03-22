@@ -32,6 +32,8 @@ enum SortOrderSettings { ascending, descending }
 
 enum AppsListGroupBy { none, category, source }
 
+enum SwipeAction { update, pin, edit, delete, open, appInfo, none }
+
 class SettingsProvider with ChangeNotifier {
   SharedPreferences? prefs;
   String? defaultAppDir;
@@ -145,6 +147,15 @@ class SettingsProvider with ChangeNotifier {
 
   set useBlackTheme(bool useBlackTheme) {
     prefs?.setBool('useBlackTheme', useBlackTheme);
+    notifyListeners();
+  }
+
+  bool get matchAppPageToIconColors {
+    return prefs?.getBool('matchAppPageToIconColors') ?? true;
+  }
+
+  set matchAppPageToIconColors(bool matchAppPageToIconColors) {
+    prefs?.setBool('matchAppPageToIconColors', matchAppPageToIconColors);
     notifyListeners();
   }
 
@@ -278,6 +289,15 @@ class SettingsProvider with ChangeNotifier {
 
   set buryNonInstalled(bool show) {
     prefs?.setBool('buryNonInstalled', show);
+    notifyListeners();
+  }
+
+  bool get groupNonInstalledSeparately {
+    return prefs?.getBool('groupNonInstalledSeparately') ?? false;
+  }
+
+  set groupNonInstalledSeparately(bool show) {
+    prefs?.setBool('groupNonInstalledSeparately', show);
     notifyListeners();
   }
 
@@ -609,6 +629,26 @@ class SettingsProvider with ChangeNotifier {
 
   set useFGService(bool val) {
     prefs?.setBool('useFGService', val);
+    notifyListeners();
+  }
+
+  SwipeAction get rightSwipeAction {
+    final index = prefs?.getInt('rightSwipeAction') ?? SwipeAction.update.index;
+    return SwipeAction.values[index.clamp(0, SwipeAction.values.length - 1)];
+  }
+
+  set rightSwipeAction(SwipeAction action) {
+    prefs?.setInt('rightSwipeAction', action.index);
+    notifyListeners();
+  }
+
+  SwipeAction get leftSwipeAction {
+    final index = prefs?.getInt('leftSwipeAction') ?? SwipeAction.pin.index;
+    return SwipeAction.values[index.clamp(0, SwipeAction.values.length - 1)];
+  }
+
+  set leftSwipeAction(SwipeAction action) {
+    prefs?.setInt('leftSwipeAction', action.index);
     notifyListeners();
   }
 }

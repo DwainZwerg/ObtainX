@@ -1,4 +1,7 @@
+import 'dart:typed_data';
+
 import 'package:easy_localization/easy_localization.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
@@ -52,6 +55,163 @@ bool _trackedUrlMatchesApkmirror(String? trackedUrl) {
   return uri.host.toLowerCase().contains('apkmirror.com');
 }
 
+/// Surfaces from [ColorScheme.fromImageProvider] are often very dark in dark mode;
+/// blend them toward [ColorScheme.primary] so the hue reads clearly on the app page.
+ColorScheme _appPageSurfacesWithVisibleAccent(ColorScheme scheme) {
+  final double surfaceTint = scheme.brightness == Brightness.dark ? 0.12 : 0.18;
+  final double outlineTint = scheme.brightness == Brightness.dark ? 0.18 : 0.28;
+  Color tintTowardPrimary(Color base) =>
+      Color.lerp(base, scheme.primary, surfaceTint) ?? base;
+  Color tintOutline(Color base) =>
+      Color.lerp(base, scheme.primary, outlineTint) ?? base;
+
+  if (scheme.brightness == Brightness.dark) {
+    return scheme.copyWith(
+      surface: tintTowardPrimary(scheme.surface),
+      surfaceDim: tintTowardPrimary(scheme.surfaceDim),
+      surfaceBright: tintTowardPrimary(scheme.surfaceBright),
+      surfaceContainerLowest:
+          tintTowardPrimary(scheme.surfaceContainerLowest),
+      surfaceContainerLow: tintTowardPrimary(scheme.surfaceContainerLow),
+      surfaceContainer: tintTowardPrimary(scheme.surfaceContainer),
+      surfaceContainerHigh: tintTowardPrimary(scheme.surfaceContainerHigh),
+      surfaceContainerHighest:
+          tintTowardPrimary(scheme.surfaceContainerHighest),
+      outline: tintOutline(scheme.outline),
+      outlineVariant: tintOutline(scheme.outlineVariant),
+    );
+  }
+  return scheme.copyWith(
+    surfaceContainer: tintTowardPrimary(scheme.surfaceContainer),
+    surfaceContainerHigh: tintTowardPrimary(scheme.surfaceContainerHigh),
+    surfaceContainerHighest:
+        tintTowardPrimary(scheme.surfaceContainerHighest),
+    outlineVariant: tintOutline(scheme.outlineVariant),
+  );
+}
+
+/// Pulls icon-derived dark schemes a few steps toward black so UI feels less neon.
+int _additionalSettingsRebuildToken(Map<String, dynamic> map) {
+  if (map.isEmpty) return 0;
+  final List<String> keys = map.keys.map((k) => k.toString()).toList()..sort();
+  int accumulator = map.length;
+  for (final String key in keys) {
+    accumulator = Object.hash(accumulator, key, map[key]?.hashCode ?? 0);
+  }
+  return accumulator;
+}
+
+int _apkUrlEntriesRebuildToken(List<MapEntry<String, String>> entries) {
+  int accumulator = entries.length;
+  for (final MapEntry<String, String> entry in entries) {
+    accumulator = Object.hash(accumulator, entry.key, entry.value);
+  }
+  return accumulator;
+}
+
+/// Fingerprint so [AppPage] rebuilds only when this app or global download
+/// state changes, not on every [AppsProvider.notifyListeners].
+int appPageAppsRebuildToken(AppsProvider provider, String appId) {
+  final bool downloadsRunning = provider.areDownloadsRunning();
+  final AppInMemory? inMemory = provider.apps[appId];
+  if (inMemory == null) {
+    return Object.hash(appId, downloadsRunning, 0);
+  }
+  final App model = inMemory.app;
+  final dynamic packageInfo = inMemory.installedInfo;
+  return Object.hashAll([
+    downloadsRunning,
+    appId,
+    inMemory.downloadProgress,
+    identityHashCode(inMemory.icon),
+    inMemory.icon?.length,
+    model.id,
+    model.url,
+    model.name,
+    model.author,
+    model.installedVersion,
+    model.latestVersion,
+    model.pinned,
+    model.lastUpdateCheck,
+    model.releaseDate,
+    model.changeLog?.hashCode,
+    model.preferredApkIndex,
+    model.overrideSource,
+    _apkUrlEntriesRebuildToken(model.apkUrls),
+    _apkUrlEntriesRebuildToken(model.otherAssetUrls),
+    _additionalSettingsRebuildToken(model.additionalSettings),
+    model.categories.length,
+    Object.hashAll(model.categories),
+    // Do not touch [AppInMemory.certificateHashes] here: it runs SHA256 per hash
+    // and this selector runs on every [AppsProvider.notifyListeners].
+    packageInfo?.versionName,
+    packageInfo?.packageName,
+    model.iconUrl,
+  ]);
+}
+
+int appPageSettingsRebuildToken(SettingsProvider settings) {
+  return Object.hash(
+    settings.matchAppPageToIconColors,
+    settings.showAppWebpage,
+    settings.checkUpdateOnDetailPage,
+    settings.highlightTouchTargets,
+    settings.categories.hashCode,
+  );
+}
+
+ColorScheme _darkenIconPageSchemeInDarkMode(ColorScheme scheme) {
+  if (scheme.brightness != Brightness.dark) return scheme;
+  const Color black = Color(0xFF000000);
+  Color darken(Color color, double mix) =>
+      Color.lerp(color, black, mix) ?? color;
+
+  return scheme.copyWith(
+    primary: darken(scheme.primary, 0.08),
+    onPrimary: scheme.onPrimary,
+    primaryContainer: darken(scheme.primaryContainer, 0.12),
+    onPrimaryContainer: scheme.onPrimaryContainer,
+    primaryFixed: darken(scheme.primaryFixed, 0.1),
+    primaryFixedDim: darken(scheme.primaryFixedDim, 0.1),
+    onPrimaryFixed: scheme.onPrimaryFixed,
+    onPrimaryFixedVariant: scheme.onPrimaryFixedVariant,
+    secondary: darken(scheme.secondary, 0.08),
+    onSecondary: scheme.onSecondary,
+    secondaryContainer: darken(scheme.secondaryContainer, 0.12),
+    onSecondaryContainer: scheme.onSecondaryContainer,
+    secondaryFixed: darken(scheme.secondaryFixed, 0.1),
+    secondaryFixedDim: darken(scheme.secondaryFixedDim, 0.1),
+    onSecondaryFixed: scheme.onSecondaryFixed,
+    onSecondaryFixedVariant: scheme.onSecondaryFixedVariant,
+    tertiary: darken(scheme.tertiary, 0.08),
+    onTertiary: scheme.onTertiary,
+    tertiaryContainer: darken(scheme.tertiaryContainer, 0.12),
+    onTertiaryContainer: scheme.onTertiaryContainer,
+    tertiaryFixed: darken(scheme.tertiaryFixed, 0.1),
+    tertiaryFixedDim: darken(scheme.tertiaryFixedDim, 0.1),
+    onTertiaryFixed: scheme.onTertiaryFixed,
+    onTertiaryFixedVariant: scheme.onTertiaryFixedVariant,
+    surface: darken(scheme.surface, 0.14),
+    onSurface: scheme.onSurface,
+    surfaceDim: darken(scheme.surfaceDim, 0.14),
+    surfaceBright: darken(scheme.surfaceBright, 0.12),
+    surfaceContainerLowest: darken(scheme.surfaceContainerLowest, 0.14),
+    surfaceContainerLow: darken(scheme.surfaceContainerLow, 0.14),
+    surfaceContainer: darken(scheme.surfaceContainer, 0.14),
+    surfaceContainerHigh: darken(scheme.surfaceContainerHigh, 0.14),
+    surfaceContainerHighest: darken(scheme.surfaceContainerHighest, 0.14),
+    onSurfaceVariant: scheme.onSurfaceVariant,
+    outline: darken(scheme.outline, 0.07),
+    outlineVariant: darken(scheme.outlineVariant, 0.09),
+    shadow: scheme.shadow,
+    scrim: scheme.scrim,
+    inverseSurface: scheme.inverseSurface,
+    onInverseSurface: scheme.onInverseSurface,
+    inversePrimary: scheme.inversePrimary,
+    surfaceTint: darken(scheme.surfaceTint, 0.06),
+  );
+}
+
 class AppPage extends StatefulWidget {
   const AppPage({
     super.key,
@@ -70,9 +230,235 @@ class _AppPageState extends State<AppPage> {
   static const double _versionRowLabelWidth = 120;
 
   late final WebViewController _webViewController;
-  bool _wasWebViewOpened = false;
-  AppInMemory? prevApp;
+  bool _webViewUrlLoaded = false;
+  bool _scheduledDetailPageRefresh = false;
+  bool _requestedMissingIconLoad = false;
+  Color? _lastWebViewSurfaceColorApplied;
   bool updating = false;
+
+  ColorScheme? _iconDerivedColorScheme;
+  String? _iconSchemeCacheKey;
+  String? _iconSchemeLoadingForKey;
+  String? _iconSchemeFailedCacheKey;
+
+  final SourceProvider _sourceProvider = SourceProvider();
+
+  // Cache for the per-page ThemeData derived from the icon color scheme.
+  // Recomputed only when the icon scheme key or parent brightness changes.
+  ThemeData? _cachedPageTheme;
+  String? _cachedPageThemeKey;
+
+  @override
+  void didUpdateWidget(covariant AppPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.appId != widget.appId) {
+      _iconDerivedColorScheme = null;
+      _iconSchemeCacheKey = null;
+      _iconSchemeLoadingForKey = null;
+      _iconSchemeFailedCacheKey = null;
+      _cachedPageTheme = null;
+      _cachedPageThemeKey = null;
+      _webViewUrlLoaded = false;
+      _scheduledDetailPageRefresh = false;
+      _requestedMissingIconLoad = false;
+      _lastWebViewSurfaceColorApplied = null;
+    }
+  }
+
+  /// Hero / dialog icons must not use [FutureBuilder] + [updateAppIcon] in build:
+  /// a new [Future] every rebuild restarts the work, and [ignoreCache] forces
+  /// expensive installed-app icon reloads and [notifyListeners] in a loop.
+  Widget _tappableAppIconDisplay({
+    required BuildContext themeContext,
+    required AppInMemory? appInMemory,
+    required double size,
+    required double borderRadius,
+    required Widget emptyPlaceholder,
+    Object? heroTag,
+  }) {
+    Widget iconChild;
+    if (appInMemory?.icon != null) {
+      iconChild = GestureDetector(
+        onTap: appInMemory == null ? null : _showAppIconSheet,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(borderRadius),
+          child: Image.memory(
+            appInMemory!.icon!,
+            height: size,
+            width: size,
+            fit: BoxFit.cover,
+            gaplessPlayback: true,
+          ),
+        ),
+      );
+    } else {
+      iconChild = GestureDetector(
+        onTap: appInMemory == null ? null : _showAppIconSheet,
+        child: emptyPlaceholder,
+      );
+    }
+    if (heroTag != null) {
+      return Hero(tag: heroTag, child: iconChild);
+    }
+    return iconChild;
+  }
+
+  Future<void> _showAppIconSheet() async {
+    if (!mounted) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      useRootNavigator: true,
+      showDragHandle: true,
+      builder: (BuildContext sheetContext) {
+        final AppsProvider appsProviderRead =
+            Provider.of<AppsProvider>(sheetContext, listen: false);
+        final bool canReset =
+            appsProviderRead.hasUserAppIconOverride(widget.appId);
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(24, 8, 24, 12),
+                  child: Text(
+                    tr('appIconActionsTitle'),
+                    style: Theme.of(sheetContext).textTheme.titleMedium,
+                  ),
+                ),
+                ListTile(
+                  leading: const Icon(Icons.image_outlined),
+                  title: Text(tr('changeAppIcon')),
+                  onTap: () async {
+                    Navigator.pop(sheetContext);
+                    final FilePickerResult? result =
+                        await FilePicker.platform.pickFiles(
+                      type: FileType.custom,
+                      allowedExtensions: const ['png'],
+                    );
+                    if (!mounted) return;
+                    if (result != null &&
+                        result.files.isNotEmpty &&
+                        result.files.single.path != null) {
+                      final AppsProvider appsProvider =
+                          Provider.of<AppsProvider>(context, listen: false);
+                      final String? err =
+                          await appsProvider.setUserAppIconFromPngPath(
+                        widget.appId,
+                        result.files.single.path!,
+                      );
+                      if (!mounted) return;
+                      if (err != null) {
+                        showError(ObtainiumError(err), context);
+                      } else {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(tr('changeAppIconSuccess')),
+                          ),
+                        );
+                      }
+                    }
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.image_search_outlined),
+                  title: Text(tr('searchWebForAppIcon')),
+                  onTap: () {
+                    Navigator.pop(sheetContext);
+                    final AppInMemory? appInMem =
+                        appsProviderRead.apps[widget.appId];
+                    final String appLabel =
+                        appInMem?.name ?? widget.appId;
+                    final String imageSearchQuery =
+                        '$appLabel square logo transparent background png';
+                    final Uri googleImageSearchUri = Uri.https(
+                      'www.google.com',
+                      '/search',
+                      <String, String>{
+                        'q': imageSearchQuery,
+                        'tbm': 'isch',
+                      },
+                    );
+                    launchUrlString(
+                      googleImageSearchUri.toString(),
+                      mode: LaunchMode.externalApplication,
+                    );
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.restore),
+                  title: Text(tr('resetAppIcon')),
+                  enabled: canReset,
+                  onTap: !canReset
+                      ? null
+                      : () async {
+                          Navigator.pop(sheetContext);
+                          final AppsProvider appsProvider =
+                              Provider.of<AppsProvider>(context, listen: false);
+                          await appsProvider.resetAppIconToDefault(
+                            widget.appId,
+                          );
+                          if (mounted) setState(() {});
+                        },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _startIconSchemeLoadIfNeeded(Uint8List iconBytes, String cacheKey) {
+    if (!mounted) return;
+    if (_iconSchemeCacheKey == cacheKey) return;
+    if (_iconSchemeLoadingForKey == cacheKey) return;
+    _iconSchemeLoadingForKey = cacheKey;
+    _extractColorSchemeFromIcon(iconBytes, cacheKey);
+  }
+
+  Future<void> _extractColorSchemeFromIcon(
+    Uint8List iconBytes,
+    String cacheKey,
+  ) async {
+    try {
+      if (!mounted) return;
+      final brightness = Theme.of(context).brightness;
+      // Use fidelity, not expressive: expressive deliberately shifts primary hue
+      // away from the seed for variety, which makes icon-based theming wrong
+      // (e.g. blue icon producing green accents).
+      final ColorScheme scheme = await ColorScheme.fromImageProvider(
+        provider: MemoryImage(iconBytes),
+        brightness: brightness,
+        dynamicSchemeVariant: DynamicSchemeVariant.fidelity,
+      );
+      if (!context.mounted) return;
+      final AppsProvider apps =
+          Provider.of<AppsProvider>(context, listen: false);
+      if (!identical(apps.apps[widget.appId]?.icon, iconBytes)) return;
+      final SettingsProvider settings =
+          Provider.of<SettingsProvider>(context, listen: false);
+      if (!settings.matchAppPageToIconColors) return;
+      setState(() {
+        if (_iconSchemeLoadingForKey == cacheKey) {
+          _iconDerivedColorScheme = scheme;
+          _iconSchemeCacheKey = cacheKey;
+          _iconSchemeLoadingForKey = null;
+          _iconSchemeFailedCacheKey = null;
+        }
+      });
+    } catch (_) {
+      if (!context.mounted) return;
+      setState(() {
+        if (_iconSchemeLoadingForKey == cacheKey) {
+          _iconSchemeLoadingForKey = null;
+          _iconSchemeFailedCacheKey = cacheKey;
+        }
+      });
+    }
+  }
 
   @override
   void initState() {
@@ -98,6 +484,46 @@ class _AppPageState extends State<AppPage> {
               : NavigationDecision.navigate,
         ),
       );
+  }
+
+  Future<void> _runCheckUpdate(String id, {bool resetVersion = false}) async {
+    final AppsProvider appsProvider =
+        Provider.of<AppsProvider>(context, listen: false);
+    try {
+      setState(() {
+        updating = true;
+      });
+      await appsProvider.checkUpdate(id);
+      if (resetVersion) {
+        appsProvider.apps[id]?.app.additionalSettings['versionDetection'] =
+            true;
+        if (appsProvider.apps[id]?.app.installedVersion != null) {
+          appsProvider.apps[id]?.app.installedVersion =
+              appsProvider.apps[id]?.app.latestVersion;
+        }
+        appsProvider.saveApps([appsProvider.apps[id]!.app]);
+      }
+    } catch (err) {
+      if (context.mounted) {
+        showError(err, context);
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          updating = false;
+        });
+      }
+    }
+  }
+
+  void _applyWebViewSurfaceColorIfNeeded(Color background) {
+    if (_lastWebViewSurfaceColorApplied == background) return;
+    _lastWebViewSurfaceColorApplied = background;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) {
+        _webViewController.setBackgroundColor(background);
+      }
+    });
   }
 
   static const Color _alternateStorePlayGreen = Color(0xFF3DDC84);
@@ -131,54 +557,117 @@ class _AppPageState extends State<AppPage> {
 
   @override
   Widget build(BuildContext context) {
-    var appsProvider = context.watch<AppsProvider>();
-    var settingsProvider = context.watch<SettingsProvider>();
+    context.select<SettingsProvider, int>(appPageSettingsRebuildToken);
+    context.select<AppsProvider, int>(
+      (AppsProvider provider) =>
+          appPageAppsRebuildToken(provider, widget.appId),
+    );
+
+    final AppsProvider appsProvider =
+        Provider.of<AppsProvider>(context, listen: false);
+    final SettingsProvider settingsProvider =
+        Provider.of<SettingsProvider>(context, listen: false);
+
+    final bool useIconPageColors = settingsProvider.matchAppPageToIconColors;
     var showAppWebpageFinal =
         (settingsProvider.showAppWebpage &&
             !widget.showOppositeOfPreferredView) ||
         (!settingsProvider.showAppWebpage &&
             widget.showOppositeOfPreferredView);
-    getUpdate(String id, {bool resetVersion = false}) async {
-      try {
-        setState(() {
-          updating = true;
-        });
-        await appsProvider.checkUpdate(id);
-        if (resetVersion) {
-          appsProvider.apps[id]?.app.additionalSettings['versionDetection'] =
-              true;
-          if (appsProvider.apps[id]?.app.installedVersion != null) {
-            appsProvider.apps[id]?.app.installedVersion =
-                appsProvider.apps[id]?.app.latestVersion;
-          }
-          appsProvider.saveApps([appsProvider.apps[id]!.app]);
-        }
-      } catch (err) {
-        // ignore: use_build_context_synchronously
-        showError(err, context);
-      } finally {
-        setState(() {
-          updating = false;
-        });
-      }
-    }
 
     bool areDownloadsRunning = appsProvider.areDownloadsRunning();
 
-    var sourceProvider = SourceProvider();
-    AppInMemory? app = appsProvider.apps[widget.appId]?.deepCopy();
+    AppInMemory? app = appsProvider.apps[widget.appId];
+    if (!_requestedMissingIconLoad &&
+        app != null &&
+        app.icon == null) {
+      _requestedMissingIconLoad = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        Provider.of<AppsProvider>(context, listen: false)
+            .updateAppIcon(widget.appId, ignoreCache: false);
+      });
+    }
     var source = app != null
-        ? sourceProvider.getSource(
+        ? _sourceProvider.getSource(
             app.app.url,
             overrideSource: app.app.overrideSource,
           )
         : null;
-    if (!areDownloadsRunning &&
-        prevApp == null &&
+
+    final Uint8List? iconBytes = app?.icon;
+    final Brightness themeBrightness = Theme.of(context).brightness;
+    if (useIconPageColors && iconBytes != null) {
+      final String iconSchemeCacheKey =
+          '${identityHashCode(iconBytes)}_${themeBrightness.name}';
+      if (_iconSchemeCacheKey != iconSchemeCacheKey &&
+          _iconSchemeLoadingForKey != iconSchemeCacheKey &&
+          _iconSchemeFailedCacheKey != iconSchemeCacheKey) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _startIconSchemeLoadIfNeeded(iconBytes, iconSchemeCacheKey);
+        });
+      }
+    } else {
+      if (_iconDerivedColorScheme != null ||
+          _iconSchemeCacheKey != null ||
+          _iconSchemeLoadingForKey != null ||
+          _iconSchemeFailedCacheKey != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted) return;
+          setState(() {
+            _iconDerivedColorScheme = null;
+            _iconSchemeCacheKey = null;
+            _iconSchemeLoadingForKey = null;
+            _iconSchemeFailedCacheKey = null;
+          });
+        });
+      }
+    }
+
+    final ThemeData parentThemeForPage = Theme.of(context);
+    final bool applyIconDerivedPageTheming =
+        useIconPageColors && _iconDerivedColorScheme != null;
+    final ColorScheme pageColorSchemeForPage = !applyIconDerivedPageTheming
+        ? parentThemeForPage.colorScheme
+        : _darkenIconPageSchemeInDarkMode(
+            _appPageSurfacesWithVisibleAccent(_iconDerivedColorScheme!),
+          );
+    final Brightness pageBrightness = pageColorSchemeForPage.brightness;
+    final double appPageSurfaceDeepen =
+        pageBrightness == Brightness.dark ? 0.055 : 0.045;
+    Color appPageDeeperSurface(Color base) =>
+        Color.lerp(base, Colors.black, appPageSurfaceDeepen) ?? base;
+    // ThemeData.copyWith() is expensive — cache it and recompute only when the
+    // icon scheme or parent brightness actually changes.
+    final String pageThemeKey =
+        '${_iconSchemeCacheKey ?? "none"}_${themeBrightness.name}';
+    if (_cachedPageThemeKey != pageThemeKey || _cachedPageTheme == null) {
+      _cachedPageThemeKey = pageThemeKey;
+      _cachedPageTheme = parentThemeForPage.copyWith(
+        colorScheme: pageColorSchemeForPage,
+        primaryColor: pageColorSchemeForPage.primary,
+        cardColor: appPageDeeperSurface(
+          pageColorSchemeForPage.surfaceContainerHighest,
+        ),
+      );
+    }
+    final ThemeData pageThemeForPage = _cachedPageTheme!;
+
+    if (!_scheduledDetailPageRefresh &&
         app != null &&
-        settingsProvider.checkUpdateOnDetailPage) {
-      prevApp = app;
-      getUpdate(app.app.id);
+        settingsProvider.checkUpdateOnDetailPage &&
+        !areDownloadsRunning) {
+      _scheduledDetailPageRefresh = true;
+      final String refreshAppId = app.app.id;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        // Let the push transition start before network + notifyListeners churn.
+        Future<void>.delayed(const Duration(milliseconds: 320), () {
+          if (mounted) {
+            _runCheckUpdate(refreshAppId);
+          }
+        });
+      });
     }
     var trackOnly = app?.app.additionalSettings['trackOnly'] == true;
 
@@ -189,9 +678,14 @@ class _AppPageState extends State<AppPage> {
         ? isVersionPseudo(app!.app)
         : false;
 
-    if (app != null && !_wasWebViewOpened) {
-      _wasWebViewOpened = true;
-      _webViewController.loadRequest(Uri.parse(app.app.url));
+    if (showAppWebpageFinal && app != null && !_webViewUrlLoaded) {
+      _webViewUrlLoaded = true;
+      final String webUrl = app.app.url;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          _webViewController.loadRequest(Uri.parse(webUrl));
+        }
+      });
     }
 
     Widget _sectionCard(
@@ -203,13 +697,16 @@ class _AppPageState extends State<AppPage> {
     }) {
       final isDark = Theme.of(ctx).brightness == Brightness.dark;
       final colorScheme = Theme.of(ctx).colorScheme;
+      final double sectionDeepen = isDark ? 0.055 : 0.045;
+      final Color defaultSectionFill = isDark
+          ? colorScheme.surfaceContainerHighest
+          : colorScheme.surfaceContainer;
       return Container(
         margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         decoration: BoxDecoration(
           color: sectionBackgroundColor ??
-              (isDark
-                  ? colorScheme.surfaceContainerHighest
-                  : colorScheme.surfaceContainer),
+              (Color.lerp(defaultSectionFill, Colors.black, sectionDeepen) ??
+                  defaultSectionFill),
           borderRadius: BorderRadius.circular(28),
           border: Border.all(
             color: colorScheme.outlineVariant,
@@ -516,7 +1013,7 @@ class _AppPageState extends State<AppPage> {
       );
     }
 
-    Widget _buildAboutBlock() {
+    Widget _buildAboutBlock(BuildContext themeContext) {
       if (app?.app.additionalSettings['about'] is! String ||
           (app?.app.additionalSettings['about'] as String).isEmpty)
         return const SizedBox.shrink();
@@ -533,7 +1030,7 @@ class _AppPageState extends State<AppPage> {
           shrinkWrap: true,
           styleSheet: MarkdownStyleSheet(
             blockquoteDecoration: BoxDecoration(
-              color: Theme.of(context).cardColor,
+              color: Theme.of(themeContext).cardColor,
             ),
             textAlign: WrapAlignment.center,
           ),
@@ -554,7 +1051,8 @@ class _AppPageState extends State<AppPage> {
       );
     }
 
-    getInfoColumn({bool small = false}) {
+    getInfoColumn(BuildContext pageThemeContext, {bool small = false}) {
+      final ThemeData pageTheme = Theme.of(pageThemeContext);
       final undeterminedTrackOnlyInstalled =
           trackOnly &&
               app?.app.additionalSettings['trackOnlyUndeterminedInstalledVersion'] ==
@@ -582,6 +1080,29 @@ class _AppPageState extends State<AppPage> {
       final lastUpdateCheckValue = app?.app.lastUpdateCheck == null
           ? tr('never')
           : _formatDateTimeToMinute(app!.app.lastUpdateCheck!);
+
+      Future<void> markTrackOnlyAsNotInstalledOnDevice() async {
+        if (app == null) return;
+        setState(() {
+          updating = true;
+        });
+        try {
+          final App appToSave = app!.app.deepCopy();
+          appToSave.additionalSettings['trackOnlyUndeterminedInstalledVersion'] =
+              false;
+          await appsProvider.saveApps([appToSave]);
+        } catch (err) {
+          if (context.mounted) {
+            showError(err, context);
+          }
+        } finally {
+          if (context.mounted) {
+            setState(() {
+              updating = false;
+            });
+          }
+        }
+      }
 
       Future<void> openFixTrackOnlyPackageIdDialog() async {
         if (app == null) return;
@@ -666,18 +1187,18 @@ class _AppPageState extends State<AppPage> {
       final versionCardChildren = <Widget>[];
       if (undeterminedTrackOnlyInstalled) {
         versionCardChildren.add(
-          _versionRow(context, tr('installed'), tr('unknown')),
+          _versionRow(pageThemeContext, tr('installed'), tr('unknown')),
         );
         versionCardChildren.add(
-          _versionRow(context, tr('latest'), app?.app.latestVersion ?? '-'),
+          _versionRow(pageThemeContext, tr('latest'), app?.app.latestVersion ?? '-'),
         );
         versionCardChildren.add(
-          _versionRow(context, lastUpdateCheckLabel, lastUpdateCheckValue),
+          _versionRow(pageThemeContext, lastUpdateCheckLabel, lastUpdateCheckValue),
         );
         if (changeLogFn != null || app?.app.releaseDate != null) {
           versionCardChildren.add(
             _versionRowWithLink(
-              context,
+              pageThemeContext,
               tr('changelog'),
               app?.app.releaseDate == null
                   ? tr('changes')
@@ -689,7 +1210,7 @@ class _AppPageState extends State<AppPage> {
         if ((app?.app.apkUrls.length ?? 0) > 0) {
           versionCardChildren.add(
             _versionRowWithLink(
-              context,
+              pageThemeContext,
               tr('assets'),
               app!.app.apkUrls.length == 1
                   ? app!.app.apkUrls[0].key
@@ -710,29 +1231,29 @@ class _AppPageState extends State<AppPage> {
       } else {
         if (installed) {
           versionCardChildren.add(
-            _versionRow(context, tr('installed'), app?.app.installedVersion ?? ''),
+            _versionRow(pageThemeContext, tr('installed'), app?.app.installedVersion ?? ''),
           );
         } else {
           versionCardChildren.add(
-            _versionRow(context, tr('installed'), tr('notInstalled')),
+            _versionRow(pageThemeContext, tr('installed'), tr('notInstalled')),
           );
         }
         versionCardChildren.add(
-          _versionRow(context, tr('latest'), app?.app.latestVersion ?? '-'),
+          _versionRow(pageThemeContext, tr('latest'), app?.app.latestVersion ?? '-'),
         );
         if (effectivelyEqual) {
           versionCardChildren.add(_versionVerdictRow(
-            context,
+            pageThemeContext,
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
               decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.tertiaryContainer,
+                color: pageTheme.colorScheme.tertiaryContainer,
                 borderRadius: BorderRadius.circular(999),
               ),
               child: Text(
                 tr('effectivelyEqual'),
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onTertiaryContainer,
+                style: pageTheme.textTheme.labelSmall?.copyWith(
+                      color: pageTheme.colorScheme.onTertiaryContainer,
                       fontWeight: FontWeight.w500,
                     ),
               ),
@@ -740,19 +1261,19 @@ class _AppPageState extends State<AppPage> {
           ));
         } else if (upToDate) {
           versionCardChildren.add(_versionVerdictRow(
-            context,
+            pageThemeContext,
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
               decoration: BoxDecoration(
-                color: Theme.of(context).brightness == Brightness.dark
+                color: pageTheme.brightness == Brightness.dark
                     ? const Color(0xFF2E7D32).withAlpha(60)
                     : const Color(0xFFC8E6C9),
                 borderRadius: BorderRadius.circular(999),
               ),
               child: Text(
                 tr('sameVersion'),
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: Theme.of(context).brightness == Brightness.dark
+                style: pageTheme.textTheme.labelSmall?.copyWith(
+                      color: pageTheme.brightness == Brightness.dark
                           ? const Color(0xFFA5D6A7)
                           : const Color(0xFF1B5E20),
                       fontWeight: FontWeight.w500,
@@ -762,17 +1283,17 @@ class _AppPageState extends State<AppPage> {
           ));
         } else if (installed) {
           versionCardChildren.add(_versionVerdictRow(
-            context,
+            pageThemeContext,
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
               decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.secondaryContainer,
+                color: pageTheme.colorScheme.secondaryContainer,
                 borderRadius: BorderRadius.circular(999),
               ),
               child: Text(
                 tr('updateAvailable'),
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                      color: Theme.of(context).colorScheme.onSecondaryContainer,
+                style: pageTheme.textTheme.labelSmall?.copyWith(
+                      color: pageTheme.colorScheme.onSecondaryContainer,
                       fontWeight: FontWeight.w500,
                     ),
               ),
@@ -780,12 +1301,12 @@ class _AppPageState extends State<AppPage> {
           ));
         }
         versionCardChildren.add(
-          _versionRow(context, lastUpdateCheckLabel, lastUpdateCheckValue),
+          _versionRow(pageThemeContext, lastUpdateCheckLabel, lastUpdateCheckValue),
         );
         if (changeLogFn != null || app?.app.releaseDate != null) {
           versionCardChildren.add(
             _versionRowWithLink(
-              context,
+              pageThemeContext,
               tr('changelog'),
               app?.app.releaseDate == null
                   ? tr('changes')
@@ -797,7 +1318,7 @@ class _AppPageState extends State<AppPage> {
         if ((app?.app.apkUrls.length ?? 0) > 0) {
           versionCardChildren.add(
             _versionRowWithLink(
-              context,
+              pageThemeContext,
               tr('assets'),
               app!.app.apkUrls.length == 1
                   ? app!.app.apkUrls[0].key
@@ -817,54 +1338,66 @@ class _AppPageState extends State<AppPage> {
         }
       }
       final versionCard = _sectionCard(
-        context,
+        pageThemeContext,
         tr('version').toUpperCase(),
         versionCardChildren,
       );
 
-      final Widget? trackOnlyInstalledErrorCard = undeterminedTrackOnlyInstalled
-          ? _sectionCard(
-              context,
-              tr('error').toUpperCase(),
-              [
-                SelectableText(
-                  app?.app.additionalSettings['trackOnlyTemporaryPackageId'] ==
-                          true
-                      ? tr('trackOnlyTempPackageIdInstalledVersion')
-                      : tr('trackOnlyUndeterminedInstalledVersion'),
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Theme.of(context).colorScheme.onErrorContainer,
-                        height: 1.35,
-                      ),
-                ),
-                const SizedBox(height: 14),
-                Align(
-                  alignment: AlignmentDirectional.centerStart,
-                  child: FilledButton.tonalIcon(
-                    onPressed: updating || app == null
-                        ? null
-                        : openFixTrackOnlyPackageIdDialog,
-                    icon: const Icon(Icons.edit_outlined, size: 20),
-                    label: Text(tr('fixPackageId')),
-                  ),
-                ),
-              ],
-              sectionBackgroundColor:
-                  Theme.of(context).colorScheme.errorContainer,
-              sectionTitleColor:
-                  Theme.of(context).colorScheme.onErrorContainer,
-            )
-          : null;
+      final bool trackOnlyUsesTemporaryPackageId =
+          app?.app.additionalSettings['trackOnlyTemporaryPackageId'] == true;
+      final Widget? trackOnlyInstalledErrorCard =
+          undeterminedTrackOnlyInstalled
+              ? _sectionCard(
+                  pageThemeContext,
+                  tr('error').toUpperCase(),
+                  [
+                    SelectableText(
+                      trackOnlyUsesTemporaryPackageId
+                          ? tr('trackOnlyTempPackageIdInstalledVersion')
+                          : tr('trackOnlyUndeterminedInstalledVersion'),
+                      style: pageTheme.textTheme.bodySmall?.copyWith(
+                            color: pageTheme.colorScheme.onErrorContainer,
+                            height: 1.35,
+                          ),
+                    ),
+                    const SizedBox(height: 14),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        FilledButton.tonalIcon(
+                          onPressed: updating || app == null
+                              ? null
+                              : openFixTrackOnlyPackageIdDialog,
+                          icon: const Icon(Icons.edit_outlined, size: 20),
+                          label: Text(tr('fixPackageId')),
+                        ),
+                        FilledButton.tonal(
+                          onPressed: updating || app == null
+                              ? null
+                              : markTrackOnlyAsNotInstalledOnDevice,
+                          child: Text(tr('itsNotInstalled')),
+                        ),
+                      ],
+                    ),
+                  ],
+                  sectionBackgroundColor:
+                      pageTheme.colorScheme.errorContainer,
+                  sectionTitleColor:
+                      pageTheme.colorScheme.onErrorContainer,
+                )
+              : null;
 
       final detailsValueStyle =
-          Theme.of(context).textTheme.bodySmall!.copyWith(
+          pageTheme.textTheme.bodySmall!.copyWith(
                 fontSize: 14,
                 fontWeight: FontWeight.w500,
               );
       final detailsMonoValueStyle =
           detailsValueStyle.copyWith(fontFamily: 'monospace');
       final detailsLinkStyle = detailsValueStyle.copyWith(
-        color: Theme.of(context).colorScheme.primary,
+        color: pageTheme.colorScheme.primary,
         decoration: TextDecoration.underline,
       );
 
@@ -921,14 +1454,14 @@ class _AppPageState extends State<AppPage> {
       final detailsChildren = <Widget>[
         if (app?.app.id != null && app!.app.id!.isNotEmpty)
           _detailRow(
-            context,
+            pageThemeContext,
             tr('package'),
             app!.app.id!,
             valueStyle: detailsMonoValueStyle,
           ),
         if (app?.app.url != null && app!.app.url!.isNotEmpty)
           _detailRowWithLink(
-            context,
+            pageThemeContext,
             tr('trackedSource'),
             app!.app.url!,
             () => launchUrlString(
@@ -947,8 +1480,8 @@ class _AppPageState extends State<AppPage> {
                   width: 100,
                   child: Text(
                     tr('otherSources'),
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    style: pageTheme.textTheme.bodySmall?.copyWith(
+                          color: pageTheme.colorScheme.onSurfaceVariant,
                           fontSize: 12,
                         ),
                   ),
@@ -961,7 +1494,7 @@ class _AppPageState extends State<AppPage> {
                     children: [
                       if (showPlayStoreIcon)
                         _buildAlternateStoreChip(
-                          chipContext: context,
+                          chipContext: pageThemeContext,
                           label: tr('playStore'),
                           backgroundColor: _alternateStorePlayGreen,
                           onPressed: () => launchUrlString(
@@ -971,7 +1504,7 @@ class _AppPageState extends State<AppPage> {
                         ),
                       if (showApkmirrorIcon)
                         _buildAlternateStoreChip(
-                          chipContext: context,
+                          chipContext: pageThemeContext,
                           label: tr('apkmirror'),
                           backgroundColor: _alternateStoreApkmirrorOrange,
                           onPressed: () => launchUrlString(
@@ -981,7 +1514,7 @@ class _AppPageState extends State<AppPage> {
                         ),
                       if (showFdroidIcon)
                         _buildAlternateStoreChip(
-                          chipContext: context,
+                          chipContext: pageThemeContext,
                           label: tr('fdroidStore'),
                           backgroundColor: _alternateStoreFdroidLightBlue,
                           onPressed: () => launchUrlString(
@@ -1004,8 +1537,8 @@ class _AppPageState extends State<AppPage> {
                 width: 100,
                 child: Text(
                   tr('categories'),
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  style: pageTheme.textTheme.bodySmall?.copyWith(
+                        color: pageTheme.colorScheme.onSurfaceVariant,
                         fontSize: 12,
                       ),
                 ),
@@ -1083,7 +1616,7 @@ class _AppPageState extends State<AppPage> {
         ),
       ];
       final detailsCard = _sectionCard(
-        context,
+        pageThemeContext,
         tr('details').toUpperCase(),
         detailsChildren,
       );
@@ -1093,144 +1626,126 @@ class _AppPageState extends State<AppPage> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           const SizedBox(height: 12),
-          if (trackOnlyInstalledErrorCard != null) trackOnlyInstalledErrorCard,
+          if (trackOnlyInstalledErrorCard != null)
+            trackOnlyInstalledErrorCard,
           versionCard,
           detailsCard,
           if (app?.app.additionalSettings['about'] is String &&
               app?.app.additionalSettings['about'].isNotEmpty)
             _sectionCard(
-              context,
+              pageThemeContext,
               tr('about').toUpperCase(),
-              [_buildAboutBlock()],
+              [_buildAboutBlock(pageThemeContext)],
             ),
         ],
       );
     }
 
-    Widget _buildDetailHeroContent() {
+    Widget _buildDetailHeroContent(BuildContext themeContext) {
       const double heroScale = 1.2;
       const heroIconSize = 58.0;
       final scaledIconSize = heroIconSize * heroScale;
-      final titleStyle = Theme.of(context).textTheme.titleLarge;
-      final bylineStyle = Theme.of(context).textTheme.bodySmall;
-      final iconWidget = FutureBuilder(
-        future: appsProvider.updateAppIcon(app?.app.id, ignoreCache: true),
-        builder: (ctx, val) {
-          if (app?.icon != null) {
-            return GestureDetector(
-              onTap: app == null ? null : () => pm.openApp(app.app.id),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: Image.memory(
-                  app!.icon!,
-                  height: scaledIconSize,
-                  width: scaledIconSize,
-                  fit: BoxFit.cover,
-                  gaplessPlayback: true,
-                ),
-              ),
-            );
-          }
-          return Container(
-            height: scaledIconSize,
-            width: scaledIconSize,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  Theme.of(context).colorScheme.primary,
-                  Theme.of(context).colorScheme.primary.withAlpha(200),
-                ],
-              ),
+      final titleStyle = Theme.of(themeContext).textTheme.titleLarge;
+      final bylineStyle = Theme.of(themeContext).textTheme.bodySmall;
+      final iconWidget = _tappableAppIconDisplay(
+        themeContext: themeContext,
+        appInMemory: app,
+        size: scaledIconSize,
+        borderRadius: 16,
+        heroTag: 'app-icon-${widget.appId}',
+        emptyPlaceholder: Container(
+          height: scaledIconSize,
+          width: scaledIconSize,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: [
+                Theme.of(themeContext).colorScheme.primary,
+                Theme.of(themeContext).colorScheme.primary.withAlpha(200),
+              ],
             ),
-          );
-        },
+          ),
+        ),
       );
       return Padding(
         padding: const EdgeInsets.only(right: 16, bottom: 8),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.center,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            iconWidget,
-            SizedBox(width: 12 * heroScale),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    app?.name ?? tr('app'),
-                    style: titleStyle?.copyWith(
-                          fontWeight: FontWeight.w700,
-                          fontSize: (titleStyle?.fontSize ?? 22) *
-                              heroScale *
-                              1.06,
-                        ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                iconWidget,
+                SizedBox(width: 12 * heroScale),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        app?.name ?? tr('app'),
+                        style: titleStyle?.copyWith(
+                              fontWeight: FontWeight.w700,
+                              fontSize: (titleStyle?.fontSize ?? 22) *
+                                  heroScale *
+                                  1.06,
+                            ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      SizedBox(height: 2 * heroScale),
+                      Text(
+                        tr('byX', args: [app?.author ?? tr('unknown')]),
+                        style: bylineStyle?.copyWith(
+                              color: Theme.of(themeContext)
+                                  .colorScheme
+                                  .onSurfaceVariant,
+                              fontSize: (bylineStyle?.fontSize ?? 12) *
+                                  heroScale *
+                                  1.08,
+                            ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
                   ),
-                  SizedBox(height: 2 * heroScale),
-                  Text(
-                    tr('byX', args: [app?.author ?? tr('unknown')]),
-                    style: bylineStyle?.copyWith(
-                          color: Theme.of(context)
-                              .colorScheme
-                              .onSurfaceVariant,
-                          fontSize:
-                              (bylineStyle?.fontSize ?? 12) * heroScale * 1.08,
-                        ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
+                ),
+              ],
             ),
           ],
         ),
       );
     }
 
-    getFullInfoColumn({bool small = false}) {
+    getFullInfoColumn(BuildContext themeContext, {bool small = false}) {
+      final ThemeData dialogColumnTheme = Theme.of(themeContext);
       const heroIconSize = 48.0;
-      final iconWidget = FutureBuilder(
-        future: appsProvider.updateAppIcon(app?.app.id, ignoreCache: true),
-        builder: (ctx, val) {
-          if (app?.icon != null) {
-            return GestureDetector(
-              onTap: app == null ? null : () => pm.openApp(app.app.id),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(small ? 12 : 16),
-                child: Image.memory(
-                  app!.icon!,
-                  height: small ? 70 : heroIconSize,
-                  width: small ? 70 : heroIconSize,
-                  fit: BoxFit.cover,
-                  gaplessPlayback: true,
+      final double dialogIconSize = small ? 70 : heroIconSize;
+      final double dialogIconRadius = small ? 12 : 16;
+      final iconWidget = _tappableAppIconDisplay(
+        themeContext: themeContext,
+        appInMemory: app,
+        size: dialogIconSize,
+        borderRadius: dialogIconRadius,
+        emptyPlaceholder: small
+            ? const SizedBox(height: 70, width: 70)
+            : Container(
+                height: heroIconSize,
+                width: heroIconSize,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(16),
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      dialogColumnTheme.colorScheme.primary,
+                      dialogColumnTheme.colorScheme.primary.withAlpha(200),
+                    ],
+                  ),
                 ),
               ),
-            );
-          }
-          if (small) {
-            return SizedBox(height: 70, width: 70);
-          }
-          return Container(
-            height: heroIconSize,
-            width: heroIconSize,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              gradient: LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  Theme.of(context).colorScheme.primary,
-                  Theme.of(context).colorScheme.primary.withAlpha(200),
-                ],
-              ),
-            ),
-          );
-        },
       );
 
       if (small) {
@@ -1247,15 +1762,15 @@ class _AppPageState extends State<AppPage> {
             Text(
               app?.name ?? tr('app'),
               textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.displaySmall,
+              style: dialogColumnTheme.textTheme.displaySmall,
             ),
             Text(
               tr('byX', args: [app?.author ?? tr('unknown')]),
               textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.headlineSmall,
+              style: dialogColumnTheme.textTheme.headlineSmall,
             ),
             SizedBox(height: settingsProvider.highlightTouchTargets ? 2 : 8),
-            getInfoColumn(small: true),
+            getInfoColumn(themeContext, small: true),
             const SizedBox(height: 24),
           ],
         );
@@ -1279,7 +1794,7 @@ class _AppPageState extends State<AppPage> {
                     children: [
                       Text(
                         app?.name ?? tr('app'),
-                        style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                        style: dialogColumnTheme.textTheme.titleLarge?.copyWith(
                               fontWeight: FontWeight.w700,
                             ),
                         maxLines: 2,
@@ -1288,8 +1803,9 @@ class _AppPageState extends State<AppPage> {
                       const SizedBox(height: 2),
                       Text(
                         tr('byX', args: [app?.author ?? tr('unknown')]),
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        style: dialogColumnTheme.textTheme.bodySmall?.copyWith(
+                              color: dialogColumnTheme
+                                  .colorScheme.onSurfaceVariant,
                             ),
                       ),
                     ],
@@ -1298,19 +1814,28 @@ class _AppPageState extends State<AppPage> {
               ],
             ),
           ),
-          getInfoColumn(small: false),
+          getInfoColumn(themeContext, small: false),
           const SizedBox(height: 24),
         ],
       );
     }
 
-    getAppWebView() => app != null
-        ? WebViewWidget(
-            key: ObjectKey(_webViewController),
-            controller: _webViewController
-              ..setBackgroundColor(Theme.of(context).colorScheme.surface),
-          )
-        : Container();
+    Widget getAppWebView(BuildContext themeContext) {
+      if (app == null) return const SizedBox.shrink();
+      final Color webViewSurface = Color.lerp(
+            Theme.of(themeContext).colorScheme.surface,
+            Colors.black,
+            Theme.of(themeContext).brightness == Brightness.dark
+                ? 0.055
+                : 0.045,
+          ) ??
+          Theme.of(themeContext).colorScheme.surface;
+      _applyWebViewSurfaceColorIfNeeded(webViewSurface);
+      return WebViewWidget(
+        key: ObjectKey(_webViewController),
+        controller: _webViewController,
+      );
+    }
 
     showMarkUpdatedDialog() {
       return showDialog(
@@ -1406,12 +1931,13 @@ class _AppPageState extends State<AppPage> {
           app.app.additionalSettings['releaseDateAsVersion'] = false;
         }
         appsProvider.saveApps([app.app]).then((value) {
-          getUpdate(app.app.id, resetVersion: versionDetectionEnabled);
+          _runCheckUpdate(app.app.id, resetVersion: versionDetectionEnabled);
         });
       }
     }
 
-    getBottomCenterActions() {
+    getBottomCenterActions(BuildContext themeContext) {
+      final ThemeData actionTheme = Theme.of(themeContext);
       const double expressiveRadius = 26;
       const EdgeInsets expressivePadding =
           EdgeInsets.symmetric(horizontal: 16, vertical: 14);
@@ -1426,14 +1952,13 @@ class _AppPageState extends State<AppPage> {
         padding: expressivePadding,
         shape: expressiveShape,
         elevation: 1,
-        shadowColor: Theme.of(context).colorScheme.shadow,
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      );
-      final ButtonStyle expressiveTonal = FilledButton.styleFrom(
-        minimumSize: expressiveMinimumSize,
-        maximumSize: expressiveMaximumSize,
-        padding: expressivePadding,
-        shape: expressiveShape,
+        shadowColor: actionTheme.colorScheme.shadow,
+        backgroundColor: actionTheme.colorScheme.primary,
+        foregroundColor: actionTheme.colorScheme.onPrimary,
+        disabledBackgroundColor:
+            actionTheme.colorScheme.onSurface.withAlpha(31),
+        disabledForegroundColor:
+            actionTheme.colorScheme.onSurface.withAlpha(97),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       );
 
@@ -1445,6 +1970,8 @@ class _AppPageState extends State<AppPage> {
           !versionsEffectivelyEqual(installedVersion, app.app.latestVersion) &&
           !installedVersionIsNewerOrEqual(installedVersion, app.app.latestVersion);
       final bool trackOnlyHasVersionUpdate = trackOnly && versionBehind;
+      final bool nonStandardVersionBehind =
+          !trackOnly && !isVersionDetectionStandard && versionBehind;
       final bool primaryActionEnabled =
           !actionBlocked && (installedVersionIsNull || versionBehind);
 
@@ -1506,9 +2033,55 @@ class _AppPageState extends State<AppPage> {
               ),
               const SizedBox(width: 10),
               Expanded(
-                child: FilledButton.tonal(
-                  style: expressiveTonal,
+                child: FilledButton(
+                  style: expressiveFilled,
                   onPressed: actionBlocked ? null : runInstallOrMarkUpdated,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.center,
+                    child: Text(
+                      tr('markUpdated'),
+                      maxLines: 1,
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+
+      if (nonStandardVersionBehind) {
+        const double dualButtonBarHeight = 52;
+        final bool markUpdatedActionBlocked =
+            updating || app?.downloadProgress != null;
+        return SizedBox(
+          height: dualButtonBarHeight,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: FilledButton(
+                  style: expressiveFilled,
+                  onPressed: actionBlocked ? null : runInstallOrMarkUpdated,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.center,
+                    child: Text(
+                      tr('update'),
+                      maxLines: 1,
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: FilledButton(
+                  style: expressiveFilled,
+                  onPressed:
+                      markUpdatedActionBlocked ? null : showMarkUpdatedDialog,
                   child: FittedBox(
                     fit: BoxFit.scaleDown,
                     alignment: Alignment.center,
@@ -1542,32 +2115,38 @@ class _AppPageState extends State<AppPage> {
       );
     }
 
-    getBottomSheetMenu() => Padding(
+    getBottomSheetMenu(BuildContext themeContext) => Padding(
       padding: EdgeInsets.fromLTRB(
         0,
         0,
         0,
-        MediaQuery.of(context).padding.bottom,
+        MediaQuery.of(themeContext).padding.bottom,
       ),
       child: Container(
         decoration: BoxDecoration(
-          color: Theme.of(context).brightness == Brightness.dark
-              ? Theme.of(context).colorScheme.surfaceContainerHigh
-              : Theme.of(context).colorScheme.surfaceContainerHighest,
+          color: Theme.of(themeContext).brightness == Brightness.dark
+              ? Theme.of(themeContext).colorScheme.surfaceContainerHigh
+              : Theme.of(themeContext).colorScheme.surfaceContainerHighest,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
           border: Border(
             top: BorderSide(
-              color: Theme.of(context).brightness == Brightness.dark
-                  ? Theme.of(context).colorScheme.outlineVariant.withAlpha(140)
-                  : Theme.of(context).colorScheme.outlineVariant.withAlpha(70),
+              color: Theme.of(themeContext).brightness == Brightness.dark
+                  ? Theme.of(themeContext)
+                      .colorScheme.outlineVariant
+                      .withAlpha(140)
+                  : Theme.of(themeContext)
+                      .colorScheme.outlineVariant
+                      .withAlpha(70),
             ),
           ),
           boxShadow: [
             BoxShadow(
-              color: Theme.of(context).colorScheme.shadow.withAlpha(
-                    Theme.of(context).brightness == Brightness.dark ? 130 : 40,
+              color: Theme.of(themeContext).colorScheme.shadow.withAlpha(
+                    Theme.of(themeContext).brightness == Brightness.dark
+                        ? 130
+                        : 40,
                   ),
-              blurRadius: Theme.of(context).brightness == Brightness.dark
+              blurRadius: Theme.of(themeContext).brightness == Brightness.dark
                   ? 18
                   : 12,
               offset: const Offset(0, -3),
@@ -1584,10 +2163,30 @@ class _AppPageState extends State<AppPage> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                   children: [
+                if (app != null && app.installedInfo != null)
+                  IconButton(
+                    color: Theme.of(themeContext).colorScheme.primary,
+                    iconSize: 24,
+                    onPressed: () {
+                      pm.openApp(app.app.id);
+                    },
+                    tooltip: tr('openApp'),
+                    icon: const Icon(Icons.open_in_new),
+                  ),
+                if (app != null && app.installedInfo != null)
+                  IconButton(
+                    color: Theme.of(themeContext).colorScheme.primary,
+                    iconSize: 24,
+                    onPressed: () {
+                      appsProvider.openAppSettings(app.app.id);
+                    },
+                    icon: const Icon(Icons.settings),
+                    tooltip: tr('settings'),
+                  ),
                 if (source != null &&
                     source.combinedAppSpecificSettingFormItems.isNotEmpty)
                   IconButton(
-                    color: Theme.of(context).colorScheme.primary,
+                    color: Theme.of(themeContext).colorScheme.primary,
                     iconSize: 24,
                     onPressed: app?.downloadProgress != null || updating
                         ? null
@@ -1598,59 +2197,43 @@ class _AppPageState extends State<AppPage> {
                     tooltip: tr('additionalOptions'),
                     icon: const Icon(Icons.edit),
                   ),
-                if (app != null && app.installedInfo != null)
-                  IconButton(
-                    color: Theme.of(context).colorScheme.primary,
-                    iconSize: 24,
-                    onPressed: () {
-                      appsProvider.openAppSettings(app.app.id);
-                    },
-                    icon: const Icon(Icons.settings),
-                    tooltip: tr('settings'),
-                  ),
                 if (app != null && showAppWebpageFinal)
                   IconButton(
-                    color: Theme.of(context).colorScheme.primary,
+                    color: Theme.of(themeContext).colorScheme.primary,
                     iconSize: 24,
                     onPressed: () {
-                      showDialog(
+                      showDialog<void>(
                         context: context,
-                        builder: (BuildContext ctx) {
-                          return AlertDialog(
-                            scrollable: true,
-                            content: getFullInfoColumn(small: true),
-                            title: Text(app.name),
-                            actions: [
-                              TextButton(
-                                onPressed: () {
-                                  Navigator.of(context).pop();
-                                },
-                                child: Text(tr('continue')),
-                              ),
-                            ],
+                        builder: (BuildContext dialogRouteContext) {
+                          return Theme(
+                            data: pageThemeForPage,
+                            child: Builder(
+                              builder: (BuildContext dialogThemedContext) {
+                                return AlertDialog(
+                                  scrollable: true,
+                                  content: getFullInfoColumn(
+                                    dialogThemedContext,
+                                    small: true,
+                                  ),
+                                  title: Text(app.name),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () {
+                                        Navigator.of(dialogRouteContext)
+                                            .pop();
+                                      },
+                                      child: Text(tr('continue')),
+                                    ),
+                                  ],
+                                );
+                              },
+                            ),
                           );
                         },
                       );
                     },
                     icon: const Icon(Icons.more_horiz),
                     tooltip: tr('more'),
-                  ),
-                if (app?.app.installedVersion != null &&
-                    app?.app.installedVersion != app?.app.latestVersion &&
-                    !versionsEffectivelyEqual(
-                        app!.app.installedVersion!, app.app.latestVersion) &&
-                    !installedVersionIsNewerOrEqual(
-                        app!.app.installedVersion!, app.app.latestVersion) &&
-                    !isVersionDetectionStandard &&
-                    !trackOnly)
-                  IconButton(
-                    color: Theme.of(context).colorScheme.primary,
-                    iconSize: 24,
-                    onPressed: app?.downloadProgress != null || updating
-                        ? null
-                        : showMarkUpdatedDialog,
-                    tooltip: tr('markUpdated'),
-                    icon: const Icon(Icons.done),
                   ),
                 if ((!isVersionDetectionStandard || trackOnly) &&
                     app?.app.installedVersion != null &&
@@ -1660,7 +2243,7 @@ class _AppPageState extends State<AppPage> {
                         installedVersionIsNewerOrEqual(
                             app!.app.installedVersion!, app.app.latestVersion)))
                   IconButton(
-                    color: Theme.of(context).colorScheme.primary,
+                    color: Theme.of(themeContext).colorScheme.primary,
                     iconSize: 24,
                     onPressed: app?.app == null || updating
                         ? null
@@ -1672,7 +2255,7 @@ class _AppPageState extends State<AppPage> {
                     tooltip: tr('resetInstallStatus'),
                   ),
                 IconButton(
-                  color: Theme.of(context).colorScheme.primary,
+                  color: Theme.of(themeContext).colorScheme.primary,
                   iconSize: 24,
                   onPressed: app?.downloadProgress != null || updating
                       ? null
@@ -1709,59 +2292,86 @@ class _AppPageState extends State<AppPage> {
       ),
     );
 
-    return Scaffold(
-      appBar: showAppWebpageFinal ? AppBar() : null,
-      backgroundColor: Theme.of(context).colorScheme.surface,
-      body: RefreshIndicator(
-        child: showAppWebpageFinal
-            ? getAppWebView()
-            : CustomScrollView(
-                slivers: [
-                  SliverToBoxAdapter(
-                    child: SafeArea(
-                      top: true,
-                      bottom: false,
-                      child: Padding(
-                        padding: const EdgeInsets.only(top: 12),
-                        child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.center,
-                            children: [
-                              IconButton(
-                                icon: const Icon(Icons.arrow_back),
-                                onPressed: () => Navigator.pop(context),
-                                tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+    return Theme(
+      data: pageThemeForPage,
+      child: Builder(
+        builder: (BuildContext themedPageContext) {
+          return Scaffold(
+            appBar: showAppWebpageFinal ? AppBar() : null,
+            backgroundColor: appPageDeeperSurface(pageColorSchemeForPage.surface),
+            body: RefreshIndicator(
+              child: showAppWebpageFinal
+                  ? getAppWebView(themedPageContext)
+                  : CustomScrollView(
+                      slivers: [
+                        SliverToBoxAdapter(
+                          child: SafeArea(
+                            top: true,
+                            bottom: false,
+                            child: Padding(
+                              padding: const EdgeInsets.only(top: 12),
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.stretch,
+                                children: [
+                                  Row(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.center,
+                                    children: [
+                                      IconButton(
+                                        icon: const Icon(Icons.arrow_back),
+                                        onPressed: () =>
+                                            Navigator.pop(context),
+                                        tooltip:
+                                            MaterialLocalizations.of(context)
+                                                .backButtonTooltip,
+                                      ),
+                                      Expanded(
+                                        child: _buildDetailHeroContent(
+                                          themedPageContext,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  getInfoColumn(
+                                    themedPageContext,
+                                    small: false,
+                                  ),
+                                  Padding(
+                                    padding: const EdgeInsets.fromLTRB(
+                                        16, 0, 16, 16),
+                                    child: Row(
+                                      children: [
+                                        Expanded(
+                                          child: getBottomCenterActions(
+                                            themedPageContext,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  SizedBox(
+                                    height: MediaQuery.of(themedPageContext)
+                                        .padding
+                                        .bottom,
+                                  ),
+                                ],
                               ),
-                              Expanded(child: _buildDetailHeroContent()),
-                            ],
-                          ),
-                          getInfoColumn(small: false),
-                          Padding(
-                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                            child: Row(
-                              children: [
-                                Expanded(child: getBottomCenterActions()),
-                              ],
                             ),
                           ),
-                          SizedBox(
-                              height: MediaQuery.of(context).padding.bottom),
-                        ],
-                      ),
-                      ),
+                        ),
+                      ],
                     ),
-                  ),
-                ],
-              ),
-        onRefresh: () async {
-          if (app != null) {
-            getUpdate(app.app.id);
-          }
+              onRefresh: () async {
+                if (app != null) {
+                  await _runCheckUpdate(app.app.id);
+                }
+              },
+            ),
+            bottomSheet: getBottomSheetMenu(themedPageContext),
+          );
         },
       ),
-      bottomSheet: getBottomSheetMenu(),
     );
   }
 }

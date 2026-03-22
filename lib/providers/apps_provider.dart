@@ -17,6 +17,7 @@ import 'package:android_package_manager/android_package_manager.dart';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:easy_localization/easy_localization.dart';
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/io_client.dart';
@@ -615,12 +616,19 @@ class AppsProvider with ChangeNotifier {
   bool gettingUpdates = false;
   LogsProvider logs = LogsProvider();
 
+  // Debounce timer for download-progress notifications so widgets that watch
+  // the whole provider (e.g. AppPage) don't get hammered on every byte chunk.
+  Timer? _progressNotifyTimer;
+
   // Variables to keep track of the app foreground status (installs can't run in the background)
   bool isForeground = true;
   late Stream<FGBGType>? foregroundStream;
   late StreamSubscription<FGBGType>? foregroundSubscription;
   late Directory APKDir;
   late Directory iconsCacheDir;
+  /// User-chosen PNG overrides; under app storage, not [iconsCacheDir], so they
+  /// survive Android "clear cache".
+  late Directory userAppIconsDir;
   late SettingsProvider settingsProvider = SettingsProvider();
 
   Iterable<AppInMemory> getAppValues() => apps.values.map((a) => a.deepCopy());
@@ -637,6 +645,11 @@ class AppsProvider with ChangeNotifier {
     () async {
       await settingsProvider.initializeSettings();
       var cacheDirs = await getExternalCacheDirectories();
+      final Directory appStorageRoot = await getAppStorageDir();
+      userAppIconsDir = Directory('${appStorageRoot.path}/user_icons');
+      if (!userAppIconsDir.existsSync()) {
+        userAppIconsDir.createSync(recursive: true);
+      }
       if (cacheDirs?.isNotEmpty ?? false) {
         APKDir = cacheDirs!.first;
         iconsCacheDir = Directory('${cacheDirs.first.path}/icons');
@@ -644,15 +657,16 @@ class AppsProvider with ChangeNotifier {
           iconsCacheDir.createSync();
         }
       } else {
-        APKDir = Directory('${(await getAppStorageDir()).path}/apks');
+        APKDir = Directory('${appStorageRoot.path}/apks');
         if (!APKDir.existsSync()) {
           APKDir.createSync();
         }
-        iconsCacheDir = Directory('${(await getAppStorageDir()).path}/icons');
+        iconsCacheDir = Directory('${appStorageRoot.path}/icons');
         if (!iconsCacheDir.existsSync()) {
           iconsCacheDir.createSync();
         }
       }
+      _migrateUserIconsFromLegacyCacheDir();
       if (!isBg) {
         // Load Apps into memory (in background processes, this is done later instead of in the constructor)
         await loadApps();
@@ -752,7 +766,13 @@ class AppsProvider with ChangeNotifier {
           int? prog = progress?.ceil();
           if (apps[app.id] != null) {
             apps[app.id]!.downloadProgress = progress;
-            notifyListeners();
+            // Throttle UI notifications to ~250 ms so AppPage's progress
+            // indicator stays smooth without flooding the widget tree.
+            _progressNotifyTimer?.cancel();
+            _progressNotifyTimer = Timer(
+              const Duration(milliseconds: 250),
+              notifyListeners,
+            );
           }
           notif = DownloadNotification(app.finalName, prog ?? 100);
           if (prog != null && prevProg != prog) {
@@ -1104,7 +1124,7 @@ class AppsProvider with ChangeNotifier {
         apkFilePath: allAPKs.join(','),
       );
     } else {
-      code = await ShizukuApkInstaller.installAPK(
+      code = await ShizukuApkInstaller().installAPK(
         file.file.uri.toString(),
         shizukuPretendToBeGooglePlay ? "com.android.vending" : "",
       );
@@ -1402,14 +1422,14 @@ class AppsProvider with ChangeNotifier {
         id = downloadedFile?.appId ?? downloadedDir!.appId;
         willBeSilent = await canInstallSilently(apps[id]!.app);
         if (settingsProvider.installerMode == 'legacy') {
-          // Legacy installer bypasses the standard permission check
+          // Legacy installer bypasses the standard permission check.
         } else if (!settingsProvider.useShizuku) {
           if (!(await settingsProvider.getInstallPermission(enforce: false))) {
             throw ObtainiumError(tr('cancelled'));
           }
         } else {
-          switch ((await ShizukuApkInstaller.checkPermission())!) {
-            case 'binder_not_found':
+          switch ((await ShizukuApkInstaller().checkPermission())!) {
+            case 'services_not_found':
               throw ObtainiumError(tr('shizukuBinderNotFound'));
             case 'old_shizuku':
               throw ObtainiumError(tr('shizukuOld'));
@@ -1882,35 +1902,224 @@ class AppsProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> updateAppIcon(String? appId, {bool ignoreCache = false}) async {
-    if (apps[appId]?.icon == null) {
-      var cachedIcon = File('${iconsCacheDir.path}/$appId.png');
-      var alreadyCached = cachedIcon.existsSync() && !ignoreCache;
-      var icon = alreadyCached
-          ? (await cachedIcon.readAsBytes())
-          : (await apps[appId]?.installedInfo?.applicationInfo?.getAppIcon());
-      if (icon != null && !alreadyCached) {
-        cachedIcon.writeAsBytes(icon.toList());
+  bool _bytesLookLikeRasterImage(Uint8List bytes) {
+    if (bytes.length < 12) return false;
+    // PNG
+    if (bytes[0] == 0x89 &&
+        bytes[1] == 0x50 &&
+        bytes[2] == 0x4E &&
+        bytes[3] == 0x47) {
+      return true;
+    }
+    // JPEG
+    if (bytes[0] == 0xFF && bytes[1] == 0xD8 && bytes[2] == 0xFF) {
+      return true;
+    }
+    // WebP (RIFF....WEBP)
+    if (bytes.length >= 12 &&
+        bytes[0] == 0x52 &&
+        bytes[1] == 0x49 &&
+        bytes[2] == 0x46 &&
+        bytes[3] == 0x46 &&
+        bytes[8] == 0x57 &&
+        bytes[9] == 0x45 &&
+        bytes[10] == 0x42 &&
+        bytes[11] == 0x50) {
+      return true;
+    }
+    return false;
+  }
+
+  bool _bytesLookLikePng(Uint8List bytes) {
+    if (bytes.length < 8) return false;
+    return bytes[0] == 0x89 &&
+        bytes[1] == 0x50 &&
+        bytes[2] == 0x4E &&
+        bytes[3] == 0x47 &&
+        bytes[4] == 0x0D &&
+        bytes[5] == 0x0A &&
+        bytes[6] == 0x1A &&
+        bytes[7] == 0x0A;
+  }
+
+  void _migrateUserIconsFromLegacyCacheDir() {
+    try {
+      if (!iconsCacheDir.existsSync()) return;
+      for (final FileSystemEntity entity in iconsCacheDir.listSync()) {
+        if (entity is! File) continue;
+        final String fileName = entity.uri.pathSegments.last;
+        if (!fileName.endsWith('.user.png')) continue;
+        final File destination = File('${userAppIconsDir.path}/$fileName');
+        if (destination.existsSync()) {
+          try {
+            entity.deleteSync();
+          } catch (_) {}
+          continue;
+        }
+        try {
+          entity.copySync(destination.path);
+          entity.deleteSync();
+        } catch (e) {
+          logs.add('User icon migrate $fileName: $e');
+        }
       }
-      if (icon != null) {
-        apps.update(
-          apps[appId]!.app.id,
-          (value) => AppInMemory(
-            apps[appId]!.app,
-            value.downloadProgress,
-            value.installedInfo,
-            icon,
-          ),
-          ifAbsent: () => AppInMemory(
-            apps[appId]!.app,
-            null,
-            apps[appId]?.installedInfo,
-            icon,
-          ),
-        );
-        notifyListeners();
+    } catch (e) {
+      logs.add('User icon migrate: $e');
+    }
+  }
+
+  File _userAppIconPngFile(String appId) {
+    return File('${userAppIconsDir.path}/$appId.user.png');
+  }
+
+  Future<Uint8List?> _fetchIconFromUrl(String url) async {
+    try {
+      final uri = Uri.tryParse(url);
+      if (uri == null || !uri.hasScheme) return null;
+      final res = await get(uri);
+      if (res.statusCode != 200) return null;
+      final bytes = res.bodyBytes;
+      if (!_bytesLookLikeRasterImage(bytes)) return null;
+      return bytes;
+    } catch (e) {
+      logs.add('Icon fetch failed for $url: $e');
+      return null;
+    }
+  }
+
+  Future<void> updateAppIcon(String? appId, {bool ignoreCache = false}) async {
+    if (appId == null || apps[appId] == null) return;
+
+    final File userIconFile = _userAppIconPngFile(appId);
+    if (userIconFile.existsSync()) {
+      try {
+        final Uint8List iconBytes = await userIconFile.readAsBytes();
+        if (_bytesLookLikePng(iconBytes)) {
+          final Uint8List? currentIcon = apps[appId]!.icon;
+          if (currentIcon != null &&
+              currentIcon.length == iconBytes.length &&
+              listEquals(currentIcon, iconBytes)) {
+            return;
+          }
+          apps.update(
+            appId,
+            (value) => AppInMemory(
+              value.app,
+              value.downloadProgress,
+              value.installedInfo,
+              iconBytes,
+            ),
+          );
+          notifyListeners();
+          return;
+        }
+      } catch (e) {
+        logs.add('User icon load failed for $appId: $e');
       }
     }
+
+    if (apps[appId]!.icon != null && !ignoreCache) return;
+
+    var cachedIcon = File('${iconsCacheDir.path}/$appId.png');
+    if (ignoreCache && cachedIcon.existsSync()) {
+      await cachedIcon.delete();
+    }
+    var alreadyCached = cachedIcon.existsSync() && !ignoreCache;
+    Uint8List? icon = alreadyCached
+        ? await cachedIcon.readAsBytes()
+        : await apps[appId]!.installedInfo?.applicationInfo?.getAppIcon();
+    if (icon == null && !alreadyCached) {
+      final url = apps[appId]!.app.iconUrl;
+      if (url != null && url.isNotEmpty) {
+        icon = await _fetchIconFromUrl(url);
+      }
+    }
+    if (icon != null && !alreadyCached) {
+      await cachedIcon.writeAsBytes(icon);
+    }
+    if (ignoreCache) {
+      apps.update(
+        apps[appId]!.app.id,
+        (value) => AppInMemory(
+          value.app,
+          value.downloadProgress,
+          value.installedInfo,
+          icon,
+        ),
+        ifAbsent: () => AppInMemory(
+          apps[appId]!.app,
+          null,
+          apps[appId]?.installedInfo,
+          icon,
+        ),
+      );
+      notifyListeners();
+      return;
+    }
+    if (icon != null) {
+      apps.update(
+        apps[appId]!.app.id,
+        (value) => AppInMemory(
+          apps[appId]!.app,
+          value.downloadProgress,
+          value.installedInfo,
+          icon,
+        ),
+        ifAbsent: () => AppInMemory(
+          apps[appId]!.app,
+          null,
+          apps[appId]?.installedInfo,
+          icon,
+        ),
+      );
+      notifyListeners();
+    }
+  }
+
+  bool hasUserAppIconOverride(String appId) =>
+      _userAppIconPngFile(appId).existsSync();
+
+  /// Copies a user-selected PNG into app storage ([userAppIconsDir]) and updates memory.
+  /// Returns null on success, or a translated error string.
+  Future<String?> setUserAppIconFromPngPath(String appId, String filePath) async {
+    if (apps[appId] == null) {
+      return tr('unexpectedError');
+    }
+    try {
+      final File sourceFile = File(filePath);
+      if (!sourceFile.existsSync()) {
+        return tr('unexpectedError');
+      }
+      final Uint8List bytes = await sourceFile.readAsBytes();
+      if (!_bytesLookLikePng(bytes)) {
+        return tr('changeAppIconInvalidPng');
+      }
+      final File dest = _userAppIconPngFile(appId);
+      await dest.writeAsBytes(bytes);
+      apps.update(
+        appId,
+        (value) => AppInMemory(
+          value.app,
+          value.downloadProgress,
+          value.installedInfo,
+          bytes,
+        ),
+      );
+      notifyListeners();
+      return null;
+    } catch (e) {
+      logs.add('setUserAppIconFromPngPath: $e');
+      return tr('unexpectedError');
+    }
+  }
+
+  Future<void> resetAppIconToDefault(String appId) async {
+    if (apps[appId] == null) return;
+    final File userFile = _userAppIconPngFile(appId);
+    if (userFile.existsSync()) {
+      deleteFile(userFile);
+    }
+    await updateAppIcon(appId, ignoreCache: true);
   }
 
   Future<void> saveApps(
@@ -1969,6 +2178,19 @@ class AppsProvider with ChangeNotifier {
             .forEach((element) {
               element.delete(recursive: true);
             });
+        final File standardIconCache = File('${iconsCacheDir.path}/$appId.png');
+        if (standardIconCache.existsSync()) {
+          deleteFile(standardIconCache);
+        }
+        final File userIconStored = _userAppIconPngFile(appId);
+        if (userIconStored.existsSync()) {
+          deleteFile(userIconStored);
+        }
+        final File legacyUserIconInCache =
+            File('${iconsCacheDir.path}/$appId.user.png');
+        if (legacyUserIconInCache.existsSync()) {
+          deleteFile(legacyUserIconInCache);
+        }
         if (apps.containsKey(appId)) {
           apps.remove(appId);
         }
@@ -2032,7 +2254,7 @@ class AppsProvider with ChangeNotifier {
                   [
                     GeneratedFormSwitch(
                       'rmAppEntry',
-                      label: tr('removeFromObtainium'),
+                      label: tr('removeFromObtainX'),
                       defaultValue: true,
                     ),
                   ],
@@ -2194,20 +2416,26 @@ class AppsProvider with ChangeNotifier {
     bool installedOnly = false,
     bool nonInstalledOnly = false,
   }) {
-    List<String> updateAppIds = [];
-    List<String> appIds = apps.keys.toList();
-    for (int i = 0; i < appIds.length; i++) {
-      App? app = apps[appIds[i]]!.app;
-      final installedVersion = app.installedVersion;
-      final hasUpdateOrNeedsInstall = installedVersion == null ||
-          (installedVersion != app.latestVersion &&
-              !versionsEffectivelyEqual(installedVersion, app.latestVersion) &&
-              !installedVersionIsNewerOrEqual(installedVersion, app.latestVersion));
-      if (hasUpdateOrNeedsInstall && (!installedOnly || !nonInstalledOnly)) {
-        if ((app.installedVersion == null &&
-                (nonInstalledOnly || !installedOnly) ||
-            (app.installedVersion != null &&
-                (installedOnly || !nonInstalledOnly)))) {
+    if (installedOnly && nonInstalledOnly) {
+      return [];
+    }
+    final List<String> updateAppIds = [];
+    for (final appInMemory in apps.values) {
+      final app = appInMemory.app;
+      final installed = app.installedVersion;
+      final latest = app.latestVersion;
+
+      if (installed == null) {
+        if (!(nonInstalledOnly || !installedOnly)) continue;
+        if (installed != latest) {
+          updateAppIds.add(app.id);
+        }
+      } else {
+        if (!(installedOnly || !nonInstalledOnly)) continue;
+        final hasEffectiveUpdate = installed != latest &&
+            !versionsEffectivelyEqual(installed, latest) &&
+            !installedVersionIsNewerOrEqual(installed, latest);
+        if (hasEffectiveUpdate) {
           updateAppIds.add(app.id);
         }
       }
