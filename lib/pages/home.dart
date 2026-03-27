@@ -344,12 +344,15 @@ class _HomePageState extends State<HomePage> {
     );
     SettingsProvider settingsProvider = context.watch<SettingsProvider>();
 
+    final AddAppPageState? addPageState =
+        (pages[1].widget.key as GlobalKey<AddAppPageState>).currentState;
     if (!prevIsLoading &&
         prevAppCount >= 0 &&
         appsCount > prevAppCount &&
         selectedIndexHistory.isNotEmpty &&
         selectedIndexHistory.last == 1 &&
-        !isLinkActivity) {
+        !isLinkActivity &&
+        !(addPageState?.isBulkAdding ?? false)) {
       switchToPage(0);
     }
     prevAppCount = appsCount;
@@ -370,6 +373,9 @@ class _HomePageState extends State<HomePage> {
         if (currentKey is GlobalKey<AddAppPageState>) {
           if (currentKey.currentState?.handleBack() == true) return;
         }
+        if (currentKey is GlobalKey<AppsPageState>) {
+          if (currentKey.currentState?.handleBack() == true) return;
+        }
         setIsReversing(
           selectedIndexHistory.length >= 2
               ? selectedIndexHistory.reversed.toList()[1]
@@ -383,7 +389,7 @@ class _HomePageState extends State<HomePage> {
         }
         final AppsPageState? appsPageState =
             (pages[0].widget.key as GlobalKey<AppsPageState>).currentState;
-        if (appsPageState == null || !appsPageState.clearSelected()) {
+        if (appsPageState == null || !appsPageState.handleBack()) {
           // Root route: Navigator.pop would remove [HomePage] and leave an empty
           // [MaterialApp] (black screen). Minimize/finish the activity instead.
           SystemNavigator.pop();

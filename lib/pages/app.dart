@@ -20,10 +20,23 @@ import 'package:obtainium/providers/apps_provider.dart';
 import 'package:obtainium/providers/settings_provider.dart';
 import 'package:obtainium/providers/source_provider.dart';
 import 'package:obtainium/store_source_icons.dart';
+import 'package:obtainium/services/bulk_scan_cache.dart';
 import 'package:url_launcher/url_launcher_string.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:provider/provider.dart';
 import 'package:markdown/markdown.dart' as md;
+
+String _formatBytes(int bytes) {
+  if (bytes >= 1024 * 1024 * 1024) {
+    return '${(bytes / (1024 * 1024 * 1024)).toStringAsFixed(1)} GB';
+  } else if (bytes >= 1024 * 1024) {
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(0)} MB';
+  } else if (bytes >= 1024) {
+    return '${(bytes / 1024).toStringAsFixed(0)} KB';
+  } else {
+    return '$bytes B';
+  }
+}
 
 Color _labelColorOnCategoryFill(Color categoryFill) {
   return categoryFill.computeLuminance() > 0.5
@@ -31,35 +44,35 @@ Color _labelColorOnCategoryFill(Color categoryFill) {
       : const Color(0xFFF5F5F5);
 }
 
-bool _trackedUrlMatchesPlayStore(String? trackedUrl, String packageId) {
-  if (trackedUrl == null ||
-      trackedUrl.isEmpty ||
-      packageId.isEmpty) {
-    return false;
-  }
-  final uri = Uri.tryParse(trackedUrl);
-  if (uri == null || uri.host.isEmpty) return false;
-  final host = uri.host.toLowerCase();
-  if (!host.contains('play.google.com')) return false;
-  final idParam = uri.queryParameters['id'];
-  if (idParam == packageId) return true;
-  return uri.path.contains(packageId);
-}
-
-/// True when the tracked source URL is already on F-Droid (hide F-Droid chip).
-bool _trackedUrlMatchesFdroid(String? trackedUrl) {
+/// True when [trackedUrl]'s host contains [hostFragment].
+/// Used to suppress an "other sources" chip when the app is already tracked
+/// from that store (e.g. pass `'apkmirror.com'` to hide the APKMirror chip).
+bool _trackedUrlIsFromHost(String? trackedUrl, String hostFragment) {
   if (trackedUrl == null || trackedUrl.isEmpty) return false;
   final uri = Uri.tryParse(trackedUrl);
   if (uri == null || uri.host.isEmpty) return false;
-  return uri.host.toLowerCase().contains('f-droid.org');
+  return uri.host.toLowerCase().contains(hostFragment);
 }
 
-/// True when the tracked source URL is already on APKMirror (hide APKMirror chip).
-bool _trackedUrlMatchesApkmirror(String? trackedUrl) {
-  if (trackedUrl == null || trackedUrl.isEmpty) return false;
-  final uri = Uri.tryParse(trackedUrl);
-  if (uri == null || uri.host.isEmpty) return false;
-  return uri.host.toLowerCase().contains('apkmirror.com');
+/// Resolves the URL to display for a store chip, consulting the bulk-scan cache.
+/// Returns null when the chip should be hidden.
+///
+/// Logic:
+/// - [alreadyTracked] → hide (user already tracks this store)
+/// - cache entry == `""` → confirmed absent in that store → hide
+/// - cache entry is a non-empty URL → show with that URL
+/// - no cache entry → show with [fallbackUrl] (not yet scanned)
+String? _resolveStoreUrl({
+  required Map<String, String>? storeData,
+  required String storeName,
+  required String fallbackUrl,
+  required bool alreadyTracked,
+}) {
+  if (alreadyTracked) return null;
+  final entry = storeData?[storeName];
+  if (entry == '') return null;
+  if (entry != null && entry.isNotEmpty) return entry;
+  return fallbackUrl;
 }
 
 void _toastUrl(String url) {
@@ -175,6 +188,9 @@ class _AppPageState extends State<AppPage> {
 
   final SourceProvider _sourceProvider = SourceProvider();
 
+  /// Resolves to this app's store-availability map from [BulkScanCache], or null.
+  Future<Map<String, String>?>? _storeAvailabilityCacheFuture;
+
   // Cache for the per-page ThemeData derived from the icon color scheme.
   // Recomputed only when the icon scheme key or parent brightness changes.
   ThemeData? _cachedPageTheme;
@@ -222,6 +238,8 @@ class _AppPageState extends State<AppPage> {
       _lastWebViewSurfaceColorApplied = null;
       _scheduledOpenInEditMode = false;
       _clearEditIconStaging();
+      _storeAvailabilityCacheFuture =
+          BulkScanCache.load().then((cache) => cache[widget.appId]);
     } else if (oldWidget.openInEditMode != widget.openInEditMode) {
       _scheduledOpenInEditMode = false;
     }
@@ -853,6 +871,8 @@ class _AppPageState extends State<AppPage> {
   @override
   void initState() {
     super.initState();
+    _storeAvailabilityCacheFuture =
+        BulkScanCache.load().then((cache) => cache[widget.appId]);
     _notesEditFocusNode.addListener(() {
       if (!_notesEditFocusNode.hasFocus || !mounted) return;
       void scrollNotesIntoView() {
@@ -904,6 +924,10 @@ class _AppPageState extends State<AppPage> {
         updating = true;
       });
       await appsProvider.checkUpdate(id);
+      // saveApps (called inside checkUpdate) replaces the in-memory icon with
+      // null for non-installed apps.  Reset the one-shot flag so the rebuild
+      // that follows will re-invoke updateAppIcon and restore any user icon.
+      setState(() => _requestedMissingIconLoad = false);
       if (resetVersion) {
         appsProvider.apps[id]?.app.additionalSettings['versionDetection'] =
             true;
@@ -1729,56 +1753,6 @@ class _AppPageState extends State<AppPage> {
         }
       }
 
-      // #6 — inline download/install status inside the version card.
-      if (app?.downloadProgress != null) {
-        final double dp = app!.downloadProgress!;
-        final bool isInstalling = dp < 0;
-        versionCardChildren.add(
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Row(
-                  children: [
-                    if (isInstalling)
-                      SizedBox(
-                        width: 13,
-                        height: 13,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: pageTheme.colorScheme.primary,
-                        ),
-                      )
-                    else
-                      Icon(
-                        Icons.download_rounded,
-                        size: 14,
-                        color: pageTheme.colorScheme.primary,
-                      ),
-                    const SizedBox(width: 7),
-                    Text(
-                      isInstalling
-                          ? '${tr('installing')}…'
-                          : tr('downloadingX', args: ['${dp.round()}%']),
-                      style: pageTheme.textTheme.bodySmall?.copyWith(
-                        color: pageTheme.colorScheme.primary,
-                        fontSize: 12,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 5),
-                LinearProgressIndicator(
-                  value: isInstalling ? null : dp / 100,
-                  borderRadius: BorderRadius.circular(4),
-                ),
-              ],
-            ),
-          ),
-        );
-      }
-
       // #4 — last-checked caption at the bottom.
       versionCardChildren.add(lastCheckedCaption);
 
@@ -1846,21 +1820,6 @@ class _AppPageState extends State<AppPage> {
 
       final String? alternateStoresPackageId = app?.app.id;
       final String? alternateStoresTrackedUrl = app?.app.url;
-      final bool showPlayStoreIcon = alternateStoresPackageId != null &&
-          alternateStoresPackageId.isNotEmpty &&
-          !_trackedUrlMatchesPlayStore(
-            alternateStoresTrackedUrl,
-            alternateStoresPackageId,
-          );
-      final bool showApkmirrorIcon = alternateStoresPackageId != null &&
-          alternateStoresPackageId.isNotEmpty &&
-          !_trackedUrlMatchesApkmirror(alternateStoresTrackedUrl);
-      final bool showFdroidIcon = alternateStoresPackageId != null &&
-          alternateStoresPackageId.isNotEmpty &&
-          !_trackedUrlMatchesFdroid(alternateStoresTrackedUrl);
-      final bool showAlternateSourcesRow = showPlayStoreIcon ||
-          showApkmirrorIcon ||
-          showFdroidIcon;
 
       final detailsChildren = <Widget>[
         if (app?.app.id != null && app!.app.id.isNotEmpty)
@@ -1870,60 +1829,156 @@ class _AppPageState extends State<AppPage> {
             app.app.id,
             valueStyle: detailsMonoValueStyle,
           ),
+        if (app?.installedInfo != null) () {
+          final appType = classifyAppType(app!);
+          final (IconData typeIcon, Color typeColor, String typeLabel) =
+              switch (appType) {
+            AppTypeGroup.user => (
+                Icons.person_rounded,
+                Colors.green,
+                tr('appTypeUser'),
+              ),
+            AppTypeGroup.system => (
+                Icons.android_rounded,
+                Colors.grey,
+                tr('appTypeSystem'),
+              ),
+            AppTypeGroup.privileged => (
+                Icons.security_rounded,
+                Colors.grey.shade600,
+                tr('appTypePrivileged'),
+              ),
+          };
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 100,
+                  child: Text(
+                    tr('appType'),
+                    style: Theme.of(pageThemeContext).textTheme.bodySmall
+                        ?.copyWith(
+                      color: Theme.of(pageThemeContext)
+                          .colorScheme
+                          .onSurfaceVariant,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+                Icon(typeIcon, size: 14, color: typeColor),
+                const SizedBox(width: 4),
+                Text(
+                  typeLabel,
+                  style: Theme.of(pageThemeContext).textTheme.bodySmall,
+                ),
+              ],
+            ),
+          );
+        }(),
         if (app?.app.url != null && app!.app.url.isNotEmpty)
           _detailRowTrackedSource(
             pageThemeContext,
             tr('trackedSource'),
             app.app.url,
           ),
-        if (showAlternateSourcesRow)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                SizedBox(
-                  width: 100,
-                  child: Text(
-                    tr('otherSources'),
-                    style: pageTheme.textTheme.bodySmall?.copyWith(
+        if (alternateStoresPackageId != null &&
+            alternateStoresPackageId.isNotEmpty)
+          FutureBuilder<Map<String, String>?>(
+            future: _storeAvailabilityCacheFuture,
+            builder: (context, snapshot) {
+              final storeData = snapshot.data;
+              final pid = alternateStoresPackageId;
+              final trackedUrl = alternateStoresTrackedUrl;
+
+              final playStoreUrl =
+                  _trackedUrlIsFromHost(trackedUrl, 'play.google.com')
+                      ? null
+                      : 'https://play.google.com/store/apps/details?id=$pid';
+
+              final fdroidUrl = _resolveStoreUrl(
+                storeData: storeData,
+                storeName: 'F-Droid',
+                fallbackUrl: 'https://f-droid.org/packages/$pid/',
+                alreadyTracked: _trackedUrlIsFromHost(trackedUrl, 'f-droid.org'),
+              );
+
+              final apkpureUrl = _resolveStoreUrl(
+                storeData: storeData,
+                storeName: 'APKPure',
+                fallbackUrl:
+                    'https://apkpure.net/search?q=${Uri.encodeComponent(pid)}',
+                alreadyTracked: _trackedUrlIsFromHost(trackedUrl, 'apkpure.'),
+              );
+
+              final apkmirrorUrl = _resolveStoreUrl(
+                storeData: storeData,
+                storeName: 'APKMirror',
+                fallbackUrl:
+                    'https://www.apkmirror.com/?post_type=app_release&searchtype=apk&s=${Uri.encodeComponent(pid)}',
+                alreadyTracked: _trackedUrlIsFromHost(trackedUrl, 'apkmirror.com'),
+              );
+
+              if (playStoreUrl == null &&
+                  fdroidUrl == null &&
+                  apkpureUrl == null &&
+                  apkmirrorUrl == null) {
+                return const SizedBox.shrink();
+              }
+
+              return Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 100,
+                      child: Text(
+                        tr('otherSources'),
+                        style: pageTheme.textTheme.bodySmall?.copyWith(
                           color: pageTheme.colorScheme.onSurfaceVariant,
                           fontSize: 12,
                         ),
-                  ),
+                      ),
+                    ),
+                    Expanded(
+                      child: Wrap(
+                        spacing: 8,
+                        runSpacing: 6,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          if (playStoreUrl != null)
+                            _buildStoreSourceLaunchIcon(
+                              iconContext: pageThemeContext,
+                              url: playStoreUrl,
+                              assetPath: StoreSourceIconPaths.playStore,
+                            ),
+                          if (fdroidUrl != null)
+                            _buildStoreSourceLaunchIcon(
+                              iconContext: pageThemeContext,
+                              url: fdroidUrl,
+                              assetPath: StoreSourceIconPaths.fdroid,
+                            ),
+                          if (apkpureUrl != null)
+                            _buildStoreSourceLaunchIcon(
+                              iconContext: pageThemeContext,
+                              url: apkpureUrl,
+                              assetPath: StoreSourceIconPaths.apkpure,
+                            ),
+                          if (apkmirrorUrl != null)
+                            _buildStoreSourceLaunchIcon(
+                              iconContext: pageThemeContext,
+                              url: apkmirrorUrl,
+                              assetPath: StoreSourceIconPaths.apkmirror,
+                            ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-                Expanded(
-                  child: Wrap(
-                    spacing: 8,
-                    runSpacing: 6,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      if (showPlayStoreIcon)
-                        _buildStoreSourceLaunchIcon(
-                          iconContext: pageThemeContext,
-                          url:
-                              'https://play.google.com/store/apps/details?id=$alternateStoresPackageId',
-                          assetPath: StoreSourceIconPaths.playStore,
-                        ),
-                      if (showApkmirrorIcon)
-                        _buildStoreSourceLaunchIcon(
-                          iconContext: pageThemeContext,
-                          url:
-                              'https://www.apkmirror.com/?post_type=app_release&searchtype=apk&s=${Uri.encodeComponent(alternateStoresPackageId)}',
-                          assetPath: StoreSourceIconPaths.apkmirror,
-                        ),
-                      if (showFdroidIcon)
-                        _buildStoreSourceLaunchIcon(
-                          iconContext: pageThemeContext,
-                          url:
-                              'https://f-droid.org/packages/$alternateStoresPackageId/',
-                          assetPath: StoreSourceIconPaths.fdroid,
-                        ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
+              );
+            },
           ),
         Padding(
           padding: const EdgeInsets.only(bottom: 8),
@@ -2316,13 +2371,28 @@ class _AppPageState extends State<AppPage> {
         return const SizedBox.shrink();
       }
 
+      // Update label shows size when known (GitHub apps); plain otherwise.
+      final int? knownApkSizeBytes = app?.app.apkSizeBytes;
+      // Appends "· 43 MB" to install/update labels when size is known (GitHub).
+      String sizeAnnotated(String base) =>
+          !trackOnly && knownApkSizeBytes != null
+          ? '$base · ${_formatBytes(knownApkSizeBytes)}'
+          : base;
+      final String updateLabel = sizeAnnotated(tr('update'));
+      final String installLabel = sizeAnnotated(tr('install'));
+
       // #2 — inline progress button replaces the action button while downloading/installing.
       if (app?.downloadProgress != null) {
         final double dp = app!.downloadProgress!;
         final bool isInstalling = dp < 0;
+        final int? totalBytes = app.downloadTotalBytes;
+        final String bytesLabel =
+            !isInstalling && totalBytes != null
+            ? ' · ${_formatBytes((dp / 100 * totalBytes).round())} / ${_formatBytes(totalBytes)}'
+            : '';
         final String label = isInstalling
             ? '${tr('installing')}…'
-            : 'Downloading ${dp.round()}%';
+            : 'Downloading ${dp.round()}%$bytesLabel';
         return ClipRRect(
           borderRadius: BorderRadius.circular(expressiveRadius),
           child: SizedBox(
@@ -2546,7 +2616,7 @@ class _AppPageState extends State<AppPage> {
                       fit: BoxFit.scaleDown,
                       alignment: Alignment.center,
                       child: Text(
-                        tr('update'),
+                        updateLabel,
                         maxLines: 1,
                         textAlign: TextAlign.center,
                       ),
@@ -2587,7 +2657,7 @@ class _AppPageState extends State<AppPage> {
               fit: BoxFit.scaleDown,
               alignment: Alignment.center,
               child: Text(
-                tr('update'),
+                updateLabel,
                 maxLines: 1,
                 textAlign: TextAlign.center,
               ),
@@ -2604,8 +2674,8 @@ class _AppPageState extends State<AppPage> {
           alignment: Alignment.center,
           child: Text(
             installedVersionIsNull
-                ? (!trackOnly ? tr('install') : tr('markInstalled'))
-                : (!trackOnly ? tr('update') : tr('markUpdated')),
+                ? (!trackOnly ? installLabel : tr('markInstalled'))
+                : (!trackOnly ? updateLabel : tr('markUpdated')),
             maxLines: 1,
             textAlign: TextAlign.center,
           ),
@@ -2939,12 +3009,13 @@ class _AppPageState extends State<AppPage> {
             ),
             floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
             body: RefreshIndicator(
+              displacement: 20,
               child: showAppWebpageFinal
                   ? getAppWebView(themedPageContext)
                   : CustomScrollView(
                       controller: _appPageScrollController,
                       physics: const AlwaysScrollableScrollPhysics(
-                        parent: BouncingScrollPhysics(),
+                        parent: ClampingScrollPhysics(),
                       ),
                       slivers: [
                         SliverToBoxAdapter(
