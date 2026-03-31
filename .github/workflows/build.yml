@@ -50,12 +50,12 @@ jobs:
 
       - name: Set up signing
         run: |
-          echo "$KEYSTORE_B64" | base64 -d > android/app/obtainx.jks
+          echo "$KEYSTORE_B64" | base64 -d > android/app/bikram_signer.p12
           cat > android/key.properties <<PROPS
           storePassword=$KS_PASS
           keyPassword=$KS_PASS
           keyAlias=$K_ALIAS
-          storeFile=obtainx.jks
+          storeFile=bikram_signer.p12
           PROPS
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
