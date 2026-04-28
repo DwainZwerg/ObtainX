@@ -812,7 +812,10 @@ class AppsPage extends StatefulWidget {
   const AppsPage({super.key, this.onDemandOnlyList = false, this.folderId});
 
   /// When true, only apps with [App.additionalSettings] `onDemandOnly` are listed
-  /// and pull-to-refresh checks only those IDs.
+  /// and pull-to-refresh checks only those IDs. When [folderId] is set,
+  /// pull-to-refresh checks only apps in that folder. Otherwise (main list),
+  /// pull-to-refresh checks all apps except on-demand-only (see
+  /// [AppsProvider.getAppsSortedByUpdateCheckTime]).
   final bool onDemandOnlyList;
 
   /// When non-null, only apps belonging to this folder ID are shown.
@@ -1761,13 +1764,30 @@ class AppsPageState extends State<AppsPage> {
     var settingsProvider = context.watch<SettingsProvider>();
 
     Future<void> backgroundScanStoreAvailability() async {
-      final ids = appsProvider.apps.keys.toList();
-      if (ids.isEmpty) return;
+      late final List<String> idsForStoreHintScan;
+      if (widget.onDemandOnlyList) {
+        idsForStoreHintScan = appsProvider.apps.values
+            .where((a) => a.app.additionalSettings['onDemandOnly'] == true)
+            .map((a) => a.app.id)
+            .toList();
+      } else if (widget.folderId != null) {
+        final String folderId = widget.folderId!;
+        idsForStoreHintScan = appsProvider.apps.values
+            .where((a) => folderIdsForApp(a.app).contains(folderId))
+            .map((a) => a.app.id)
+            .toList();
+      } else {
+        idsForStoreHintScan = appsProvider.apps.values
+            .where((a) => a.app.additionalSettings['onDemandOnly'] != true)
+            .map((a) => a.app.id)
+            .toList();
+      }
+      if (idsForStoreHintScan.isEmpty) return;
       final cache = await BulkScanCache.load();
-      final needsApkMirror = ids
+      final needsApkMirror = idsForStoreHintScan
           .where((id) => !(cache[id]?.containsKey('APKMirror') ?? false))
           .toList();
-      final needsFDroid = ids
+      final needsFDroid = idsForStoreHintScan
           .where((id) => !(cache[id]?.containsKey('F-Droid') ?? false))
           .toList();
       if (needsApkMirror.isEmpty && needsFDroid.isEmpty) return;
@@ -1789,16 +1809,29 @@ class AppsPageState extends State<AppsPage> {
         refreshingSince = DateTime.now();
         _appListIconWarmFutures.clear();
       });
-      final Future<List<App>> refreshFuture = widget.onDemandOnlyList
-          ? appsProvider.checkUpdates(
-              specificIds: appsProvider.apps.values
-                  .where(
-                    (a) => a.app.additionalSettings['onDemandOnly'] == true,
-                  )
-                  .map((a) => a.app.id)
-                  .toList(),
-            )
-          : appsProvider.checkUpdates();
+      final Future<List<App>> refreshFuture;
+      if (widget.onDemandOnlyList) {
+        refreshFuture = appsProvider.checkUpdates(
+          specificIds: appsProvider.apps.values
+              .where(
+                (a) => a.app.additionalSettings['onDemandOnly'] == true,
+              )
+              .map((a) => a.app.id)
+              .toList(),
+        );
+      } else if (widget.folderId != null) {
+        final String folderId = widget.folderId!;
+        refreshFuture = appsProvider.checkUpdates(
+          specificIds: appsProvider.apps.values
+              .where((a) => folderIdsForApp(a.app).contains(folderId))
+              .map((a) => a.app.id)
+              .toList(),
+        );
+      } else {
+        // Main list: all tracked apps (including those assigned to folders).
+        // [getAppsSortedByUpdateCheckTime] already skips on-demand-only apps.
+        refreshFuture = appsProvider.checkUpdates();
+      }
       return refreshFuture
           .catchError((e) {
             if (!context.mounted) return <App>[];
@@ -2335,8 +2368,18 @@ class AppsPageState extends State<AppsPage> {
         .toSet();
 
     getLoadingWidgets() {
+      final String? progressFolderId = widget.folderId;
+      final int folderMemberCountForProgress = progressFolderId == null
+          ? 0
+          : appsProvider.apps.values
+                .where(
+                  (a) => folderIdsForApp(a.app).contains(progressFolderId),
+                )
+                .length;
       final int progressDenominator = widget.onDemandOnlyList
           ? (onDemandOnlyAppCount > 0 ? onDemandOnlyAppCount : 1)
+          : progressFolderId != null
+          ? (folderMemberCountForProgress > 0 ? folderMemberCountForProgress : 1)
           : (appsProvider.apps.isNotEmpty ? appsProvider.apps.length : 1);
       return [
         if (listedApps.isEmpty)
@@ -2375,6 +2418,13 @@ class AppsPageState extends State<AppsPage> {
                                           .app
                                           .additionalSettings['onDemandOnly'] ==
                                       true,
+                            )
+                            .where(
+                              (element) =>
+                                  progressFolderId == null ||
+                                  folderIdsForApp(element.app).contains(
+                                    progressFolderId,
+                                  ),
                             )
                             .length /
                         progressDenominator,
@@ -3086,6 +3136,17 @@ class AppsPageState extends State<AppsPage> {
                   const Divider(),
                   TextButton(
                     onPressed: () {
+                      Navigator.of(context).pop();
+                      _showFolderAssignDialog(context, selectedApps);
+                    },
+                    child: Text(
+                      tr('addToFolder'),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                  const Divider(),
+                  TextButton(
+                    onPressed: () {
                       String urls = '';
                       for (var a in selectedApps) {
                         urls += '${a.url}\n';
@@ -3529,10 +3590,9 @@ class AppsPageState extends State<AppsPage> {
                   visualDensity: VisualDensity.compact,
                   iconSize: 24,
                   color: colorScheme.primary,
-                  onPressed: () =>
-                      _showFolderAssignDialog(context, selectedApps),
-                  tooltip: tr('addToFolder'),
-                  icon: const Icon(Icons.folder_copy_outlined),
+                  onPressed: getMassObtainFunction(),
+                  tooltip: tr('installUpdateSelectedApps'),
+                  icon: const Icon(Icons.file_download_outlined),
                 ),
               ),
             ),
