@@ -37,6 +37,7 @@ class NavigationPageItem {
 class _HomePageState extends State<HomePage> {
   List<int> selectedIndexHistory = [];
   bool isReversing = false;
+  int pageSwitchRequestId = 0;
   int prevAppCount = -1;
   bool prevIsLoading = true;
   late AppLinks _appLinks;
@@ -326,6 +327,16 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> switchToPage(int index) async {
+    final int activeIndex = selectedIndexHistory.isEmpty
+        ? 0
+        : selectedIndexHistory.last;
+    if (activeIndex == index) {
+      return;
+    }
+
+    pageSwitchRequestId += 1;
+    final int currentRequestId = pageSwitchRequestId;
+
     setIsReversing(index);
     if (index == 0) {
       while ((pages[0].widget.key as GlobalKey<AppsPageState>).currentState !=
@@ -333,16 +344,22 @@ class _HomePageState extends State<HomePage> {
         // Avoid duplicate GlobalKey error
         await Future.delayed(const Duration(microseconds: 1));
       }
+      if (!mounted || currentRequestId != pageSwitchRequestId) {
+        return;
+      }
       setState(() {
         selectedIndexHistory.clear();
       });
     } else if (selectedIndexHistory.isEmpty ||
         (selectedIndexHistory.isNotEmpty &&
             selectedIndexHistory.last != index)) {
+      if (!mounted || currentRequestId != pageSwitchRequestId) {
+        return;
+      }
       setState(() {
-        int existingInd = selectedIndexHistory.indexOf(index);
-        if (existingInd >= 0) {
-          selectedIndexHistory.removeAt(existingInd);
+        int existingIndex = selectedIndexHistory.indexOf(index);
+        if (existingIndex >= 0) {
+          selectedIndexHistory.removeAt(existingIndex);
         }
         selectedIndexHistory.add(index);
       });
@@ -430,14 +447,14 @@ class _HomePageState extends State<HomePage> {
               .map(
                 (MapEntry<int, NavigationPageItem> entry) =>
                     NavigationDestination(
-                  icon: entry.key == 0 && updateCount > 0
-                      ? Badge(
-                          label: Text(updateCount.toString()),
-                          child: Icon(entry.value.icon),
-                        )
-                      : Icon(entry.value.icon),
-                  label: entry.value.title,
-                ),
+                      icon: entry.key == 0 && updateCount > 0
+                          ? Badge(
+                              label: Text(updateCount.toString()),
+                              child: Icon(entry.value.icon),
+                            )
+                          : Icon(entry.value.icon),
+                      label: entry.value.title,
+                    ),
               )
               .toList();
           final int homeNavSelectedIndex = selectedIndexHistory.isEmpty

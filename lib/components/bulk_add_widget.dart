@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:easy_localization/easy_localization.dart';
+import 'package:expressive_loading_indicator/expressive_loading_indicator.dart';
 import 'package:flutter/material.dart';
 import 'package:obtainium/app_sources/apkmirror.dart';
 import 'package:obtainium/app_sources/apkpure.dart';
@@ -95,6 +97,24 @@ class BulkAddWidgetState extends State<BulkAddWidget> {
   final Set<String> _selectedPackages = {};
   String _searchQuery = '';
   final TextEditingController _searchController = TextEditingController();
+
+  // ── Cached filtered-apps list ────────────────────────────────────────────
+  // The previous getter ran the .where(...).toList() pass on every build -
+  // including every checkbox tap. With 300 apps that's ~600 String ops and a
+  // List allocation each tap, all wasted. We now cache the result keyed by
+  // the source list identity + the search query and only recompute when one
+  // of those changes. On checkbox toggles the cached list is reused as-is.
+  List<InstalledAppInfo>? _filteredAppsCache;
+  Object? _filteredAppsCacheSourceId;
+  String? _filteredAppsCacheQuery;
+
+  // ── Search-input debounce ────────────────────────────────────────────────
+  // The previous TextField fired setState per keystroke - rebuilding the chip
+  // rows, the count, the FAB badge, and the entire ListView on every key. We
+  // now coalesce keystrokes within a 150ms window into a single setState so
+  // fast typing rebuilds the step at most ~6 times instead of once-per-key.
+  Timer? _searchDebounceTimer;
+  static const Duration _searchDebounceWindow = Duration(milliseconds: 150);
   // Icon cache: packageName -> Uint8List | false (failed). Absent key = not loaded yet.
   final Map<String, Object?> _iconCache = {};
   final Map<String, Future<void>> _iconLoadFutures = {};
@@ -175,6 +195,7 @@ class BulkAddWidgetState extends State<BulkAddWidget> {
 
   @override
   void dispose() {
+    _searchDebounceTimer?.cancel();
     _searchController.dispose();
     super.dispose();
   }
@@ -656,15 +677,28 @@ class BulkAddWidgetState extends State<BulkAddWidget> {
   // ─── App Selection Step ────────────────────────────────────────────────
 
   List<InstalledAppInfo> get _filteredApps {
-    if (_searchQuery.isEmpty) return _installedApps;
-    final q = _searchQuery.toLowerCase();
-    return _installedApps
-        .where(
-          (a) =>
-              a.name.toLowerCase().contains(q) ||
-              a.packageName.toLowerCase().contains(q),
-        )
-        .toList();
+    // Reuse the cached result when neither the source list nor the query
+    // has changed - this is the common case during checkbox interactions.
+    if (identical(_filteredAppsCacheSourceId, _installedApps) &&
+        _filteredAppsCacheQuery == _searchQuery &&
+        _filteredAppsCache != null) {
+      return _filteredAppsCache!;
+    }
+    final List<InstalledAppInfo> result;
+    if (_searchQuery.isEmpty) {
+      result = _installedApps;
+    } else {
+      final q = _searchQuery.toLowerCase();
+      result = _installedApps
+          .where(
+            (a) => a.nameLower.contains(q) || a.packageNameLower.contains(q),
+          )
+          .toList();
+    }
+    _filteredAppsCacheSourceId = _installedApps;
+    _filteredAppsCacheQuery = _searchQuery;
+    _filteredAppsCache = result;
+    return result;
   }
 
   Widget _lazyBulkAppIcon(String packageName, {double size = 40}) {
@@ -714,8 +748,25 @@ class BulkAddWidgetState extends State<BulkAddWidget> {
                           vertical: 8,
                         ),
                       ),
-                      onChanged: (String value) =>
-                          setState(() => _searchQuery = value),
+                      onChanged: (String value) {
+                        // Debounced: coalesces fast typing into a single
+                        // setState after the user pauses for the window
+                        // duration. Instant-clear (empty value) skips the
+                        // debounce so the user sees the list reset right
+                        // away when they backspace to nothing.
+                        _searchDebounceTimer?.cancel();
+                        if (value.isEmpty) {
+                          if (_searchQuery.isNotEmpty) {
+                            setState(() => _searchQuery = '');
+                          }
+                          return;
+                        }
+                        _searchDebounceTimer = Timer(_searchDebounceWindow, () {
+                          if (!mounted) return;
+                          if (_searchQuery == value) return;
+                          setState(() => _searchQuery = value);
+                        });
+                      },
                     ),
                   ),
                   if (_searchQuery.isNotEmpty)
@@ -726,6 +777,7 @@ class BulkAddWidgetState extends State<BulkAddWidget> {
                         color: colorScheme.onSurfaceVariant,
                       ),
                       onPressed: () {
+                        _searchDebounceTimer?.cancel();
                         _searchController.clear();
                         setState(() => _searchQuery = '');
                       },
@@ -2120,9 +2172,10 @@ class BulkAddWidgetState extends State<BulkAddWidget> {
 
   // ─── Helpers ───────────────────────────────────────────────────────────
 
-  Widget _m3LoadingIndicator({double size = 64}) => BulkM3LoadingIndicator(
-    size: size,
+  Widget _m3LoadingIndicator({double size = 64}) => ExpressiveLoadingIndicator(
     color: Theme.of(context).colorScheme.primary,
+    constraints: BoxConstraints.tightFor(width: size, height: size),
+    semanticsLabel: tr('pleaseWait'),
   );
 
   // ─── Build ─────────────────────────────────────────────────────────────
@@ -2258,75 +2311,9 @@ class _LazyBulkAppIconState extends State<_LazyBulkAppIcon> {
   }
 }
 
-/// Staggered-dot loading indicator used while bulk lists load or stores scan.
-class BulkM3LoadingIndicator extends StatefulWidget {
-  final double size;
-  final Color color;
-
-  const BulkM3LoadingIndicator({
-    super.key,
-    required this.size,
-    required this.color,
-  });
-
-  @override
-  State<BulkM3LoadingIndicator> createState() => _BulkM3LoadingIndicatorState();
-}
-
-class _BulkM3LoadingIndicatorState extends State<BulkM3LoadingIndicator>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  static const int _dotCount = 5;
-  static const double _staggerFraction = 0.15;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1500),
-    )..repeat();
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final double dotSize = widget.size / _dotCount * 0.7;
-    return SizedBox(
-      width: widget.size,
-      height: widget.size * 0.45,
-      child: AnimatedBuilder(
-        animation: _controller,
-        builder: (BuildContext context, Widget? child) {
-          return Row(
-            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: List<Widget>.generate(_dotCount, (int dotIndex) {
-              final double wavePhase =
-                  (_controller.value - dotIndex * _staggerFraction) % 1.0;
-              final double scale =
-                  0.35 + 0.65 * (0.5 - 0.5 * math.cos(wavePhase * 2 * math.pi));
-              return Transform.scale(
-                scale: scale,
-                child: Container(
-                  width: dotSize,
-                  height: dotSize,
-                  decoration: BoxDecoration(
-                    color: widget.color,
-                    shape: BoxShape.circle,
-                  ),
-                ),
-              );
-            }),
-          );
-        },
-      ),
-    );
-  }
-}
+// [BulkM3LoadingIndicator] - the hand-rolled 5-dot staggered-scale animation
+// that used to live here - was replaced by [ExpressiveLoadingIndicator] from
+// package:expressive_loading_indicator. The new widget renders the official
+// Material 3 Expressive morphing-polygon shape (the same one shown inside
+// the pull-to-refresh indicator) and keeps the loading visuals consistent
+// across the app.
