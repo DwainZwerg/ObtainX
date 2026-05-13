@@ -9,6 +9,7 @@ import 'package:obtainium/app_sources/github.dart';
 import 'package:obtainium/main.dart';
 import 'package:obtainium/providers/apps_provider.dart';
 import 'package:obtainium/folders/app_folder.dart';
+import 'package:obtainium/providers/native_provider.dart';
 import 'package:obtainium/providers/source_provider.dart';
 import 'package:obtainium/theme/app_theme_accent.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -56,6 +57,10 @@ class SettingsProvider with ChangeNotifier {
   String? defaultAppDir;
   bool justStarted = true;
   bool isTV = false;
+
+  static const Duration _storageAccessWarningCooldown = Duration(minutes: 5);
+  DateTime? _lastExportDirAccessWarningAt;
+  DateTime? _lastApkSaveDirAccessWarningAt;
 
   /// Mirrors last [setCategories] write; [getString] can lag [setString] briefly.
   Map<String, int>? _categoriesMemory;
@@ -1018,24 +1023,26 @@ class SettingsProvider with ChangeNotifier {
     notifyListeners();
   }
 
-  Future<Uri?> getExportDir() async {
+  Future<Uri?> getExportDir({
+    bool requireAccess = true,
+    bool warnIfInaccessible = false,
+  }) async {
     final String? uriString = prefs?.getString('exportDir');
     if (uriString == null) {
       return null;
     }
     final Uri uri = Uri.parse(uriString);
-    Future<bool> canAccessExportTree(Uri treeUri) async {
-      final bool readable = await saf.canRead(treeUri) ?? false;
-      final bool writable = await saf.canWrite(treeUri) ?? false;
-      return readable && writable;
+    if (!requireAccess) {
+      return uri;
     }
 
-    if (!await canAccessExportTree(uri)) {
-      // Transient SAF failures should not wipe a still-valid grant.
+    if (!await _canReadAndWriteSafTree(uri)) {
+      // Retry once so transient SAF failures do not hide a still-valid grant.
       await Future<void>.delayed(const Duration(milliseconds: 200));
-      if (!await canAccessExportTree(uri)) {
-        prefs?.remove('exportDir');
-        notifyListeners();
+      if (!await _canReadAndWriteSafTree(uri)) {
+        if (warnIfInaccessible) {
+          _showStorageAccessWarning(isExportDir: true);
+        }
         return null;
       }
     }
@@ -1059,7 +1066,11 @@ class SettingsProvider with ChangeNotifier {
     }
 
     final String? previousExportDirString = prefs?.getString('exportDir');
-    final Uri? newUri = await saf.openDocumentTree();
+    final Uri? newUri = await NativeFeatures.openPersistedDocumentTree(
+      initialUri: previousExportDirString == null
+          ? null
+          : Uri.parse(previousExportDirString),
+    );
 
     if (newUri == null) {
       return;
@@ -1082,23 +1093,25 @@ class SettingsProvider with ChangeNotifier {
     }
   }
 
-  Future<Uri?> getApkSaveDir() async {
+  Future<Uri?> getApkSaveDir({
+    bool requireAccess = true,
+    bool warnIfInaccessible = false,
+  }) async {
     final String? uriString = prefs?.getString('apkSaveDir');
     if (uriString == null) {
       return null;
     }
     final Uri uri = Uri.parse(uriString);
-    Future<bool> canAccessApkSaveTree(Uri treeUri) async {
-      final bool readable = await saf.canRead(treeUri) ?? false;
-      final bool writable = await saf.canWrite(treeUri) ?? false;
-      return readable && writable;
+    if (!requireAccess) {
+      return uri;
     }
 
-    if (!await canAccessApkSaveTree(uri)) {
+    if (!await _canReadAndWriteSafTree(uri)) {
       await Future<void>.delayed(const Duration(milliseconds: 200));
-      if (!await canAccessApkSaveTree(uri)) {
-        prefs?.remove('apkSaveDir');
-        notifyListeners();
+      if (!await _canReadAndWriteSafTree(uri)) {
+        if (warnIfInaccessible) {
+          _showStorageAccessWarning(isExportDir: false);
+        }
         return null;
       }
     }
@@ -1121,7 +1134,11 @@ class SettingsProvider with ChangeNotifier {
     }
 
     final String? previousApkSaveDirString = prefs?.getString('apkSaveDir');
-    final Uri? newUri = await saf.openDocumentTree();
+    final Uri? newUri = await NativeFeatures.openPersistedDocumentTree(
+      initialUri: previousApkSaveDirString == null
+          ? null
+          : Uri.parse(previousApkSaveDirString),
+    );
 
     if (newUri == null) {
       return;
@@ -1143,6 +1160,40 @@ class SettingsProvider with ChangeNotifier {
         );
       } catch (_) {}
     }
+  }
+
+  Future<bool> _canReadAndWriteSafTree(Uri treeUri) async {
+    if (await NativeFeatures.hasPersistedDocumentTreePermission(treeUri)) {
+      return true;
+    }
+
+    final bool canReadTree = await saf.canRead(treeUri) ?? false;
+    if (!canReadTree) {
+      return false;
+    }
+
+    final bool canWriteTree = await saf.canWrite(treeUri) ?? false;
+    return canWriteTree;
+  }
+
+  void _showStorageAccessWarning({required bool isExportDir}) {
+    final DateTime now = DateTime.now();
+    final DateTime? lastWarningAt = isExportDir
+        ? _lastExportDirAccessWarningAt
+        : _lastApkSaveDirAccessWarningAt;
+
+    if (lastWarningAt != null &&
+        now.difference(lastWarningAt) < _storageAccessWarningCooldown) {
+      return;
+    }
+
+    if (isExportDir) {
+      _lastExportDirAccessWarningAt = now;
+    } else {
+      _lastApkSaveDirAccessWarningAt = now;
+    }
+
+    Fluttertoast.showToast(msg: tr('storagePermissionDenied'));
   }
 
   /// When true (and an APK save folder is set), copies of downloaded APKs are
