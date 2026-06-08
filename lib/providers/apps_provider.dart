@@ -146,6 +146,20 @@ String? reconciledInstalledVersionForDisabledVersionDetection(
   if (reconciledInstalled?.key == true) {
     return reconciledInstalled!.value;
   }
+  // Detect external upgrade/downgrade when both versions strictly share a standard format.
+  // The guard prevents false positives where non-strict substring matching makes an
+  // incompatible pair (e.g. "4.15.0" vs "26.06.01-de-vanced") appear reconcilable.
+  final realFormats = findStandardFormatsForVersion(realInstalledVersion, true);
+  if (realFormats.isNotEmpty) {
+    if (reconciledLatest?.key == false &&
+        realFormats.intersection(findStandardFormatsForVersion(latestVersion, true)).isNotEmpty) {
+      return realInstalledVersion;
+    }
+    if (reconciledInstalled?.key == false &&
+        realFormats.intersection(findStandardFormatsForVersion(reportedInstalledVersion, true)).isNotEmpty) {
+      return realInstalledVersion;
+    }
+  }
   return null;
 }
 
@@ -399,7 +413,19 @@ bool appHasActionableUpdate(App app) {
   if (isSkipActiveForCurrentLatest(app)) return false;
   if (installed == latest) return false;
   if (versionsEffectivelyEqual(installed, latest)) return false;
-  if (versionOrderIsUnclear(installed, latest)) return false;
+
+  if (versionOrderIsUnclear(installed, latest)) {
+    final dynamic lastInstalledTimeRaw = app.additionalSettings['lastInstalledTime'];
+    if (lastInstalledTimeRaw is int && app.releaseDate != null) {
+      final DateTime installedTime = DateTime.fromMillisecondsSinceEpoch(lastInstalledTimeRaw);
+      return app.releaseDate!.isAfter(installedTime);
+    }
+    // Pseudo-mode apps can't reliably compare versions; any difference is a potential
+    // update regardless of ordering ambiguity.
+    return app.additionalSettings['versionDetection'] == 'pseudo' ||
+        app.additionalSettings['versionDetection'] == false;
+  }
+
   final int? cmp = compareVersionsByNumericSegments(installed, latest);
   if (cmp == 1) return false;
   if (cmp == 0) return true;
@@ -415,7 +441,22 @@ bool versionOrderUncertainUpdate(App app) {
   if (isSkipActiveForCurrentLatest(app)) return false;
   if (installed == latest) return false;
   if (versionsEffectivelyEqual(installed, latest)) return false;
-  return versionOrderIsUnclear(installed, latest);
+
+  if (versionOrderIsUnclear(installed, latest)) {
+    final dynamic lastInstalledTimeRaw = app.additionalSettings['lastInstalledTime'];
+    if (lastInstalledTimeRaw is int && app.releaseDate != null) {
+      final DateTime installedTime = DateTime.fromMillisecondsSinceEpoch(
+        lastInstalledTimeRaw,
+      );
+      // Suppress uncertain indicator only when timestamps confirm the release IS newer
+      // than the last install (appHasActionableUpdate already covers that case).
+      // When release is not after install, the order is still ambiguous — the user
+      // should be able to decide.
+      return !app.releaseDate!.isAfter(installedTime);
+    }
+    return true;
+  }
+  return false;
 }
 
 /// Compare version strings by numeric segments (e.g. 2.0.0 vs 1.9.9).
@@ -1215,7 +1256,23 @@ Future<PackageInfo?> getInstalledInfo(
     } else if (kDebugMode && packageName == '$obtainiumId.fdroid') {
       packageNamesToTry.insert(0, '$obtainiumId.fdroid.debug');
     }
+
+    Set<String>? installedPackageNames;
+    try {
+      final List<PackageInfo> installed = await pm.getInstalledPackages(
+        flags: packageInfoFlagsLight,
+      ) ?? [];
+      installedPackageNames = installed.map((p) => p.packageName).whereType<String>().toSet();
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('Failed to list installed packages: $e');
+      }
+    }
+
     for (final String packageNameToTry in packageNamesToTry) {
+      if (installedPackageNames != null && !installedPackageNames.contains(packageNameToTry)) {
+        continue;
+      }
       try {
         return await pm.getPackageInfo(
           packageName: packageNameToTry,
@@ -2870,6 +2927,11 @@ class AppsProvider with ChangeNotifier {
                 ?.isNotEmpty !=
             true);
     bool isDirectAPKLink = source.runtimeType == DirectAPKLink().runtimeType;
+    final bool hasCommitSha = realInstalledVersion != null &&
+        (_commitHashLikeTokensFromVersion(realInstalledVersion).isNotEmpty ||
+            _commitHashLikeTokensFromVersion(app.app.latestVersion).isNotEmpty);
+    final bool releaseCommitShaAsVersion =
+        app.app.additionalSettings['releaseCommitShaAsVersion'] == true;
     return app.app.additionalSettings['trackOnly'] != true &&
         app.app.additionalSettings['releaseDateAsVersion'] != true &&
         !isHTMLWithNoVersionDetection &&
@@ -2880,7 +2942,9 @@ class AppsProvider with ChangeNotifier {
                   app.app.latestVersion,
                 ) !=
                 null ||
-            naiveStandardVersionDetection);
+            naiveStandardVersionDetection ||
+            hasCommitSha ||
+            releaseCommitShaAsVersion);
   }
 
   // Given an App and it's on-device info...
@@ -2897,8 +2961,22 @@ class AppsProvider with ChangeNotifier {
       app.additionalSettings['trackOnlyTemporaryPackageId'] = false;
       modded = true;
     }
+    if (installedInfo?.lastUpdateTime != null) {
+      if (app.additionalSettings['lastInstalledTime'] != installedInfo!.lastUpdateTime) {
+        app.additionalSettings['lastInstalledTime'] = installedInfo.lastUpdateTime;
+        modded = true;
+      }
+    } else {
+      if (app.additionalSettings.containsKey('lastInstalledTime')) {
+        app.additionalSettings.remove('lastInstalledTime');
+        modded = true;
+      }
+    }
     var versionDetectionIsStandard =
-        app.additionalSettings['versionDetection'] == true;
+        app.additionalSettings['versionDetection'] == 'auto' ||
+        app.additionalSettings['versionDetection'] == 'standard' ||
+        app.additionalSettings['versionDetection'] == true ||
+        app.additionalSettings['versionDetection'] == null;
     var naiveStandardVersionDetection =
         app.additionalSettings['naiveStandardVersionDetection'] == true ||
         SourceProvider()
@@ -2925,17 +3003,6 @@ class AppsProvider with ChangeNotifier {
     }
     if (realInstalledVersion != null &&
         app.installedVersion != null &&
-        !versionDetectionIsStandard) {
-      final reconciled = reconcileVersionDifferences(realInstalledVersion, app.latestVersion);
-      if (reconciled?.key != true) {
-        if (app.installedVersion == realInstalledVersion) {
-          app.installedVersion = app.latestVersion;
-          modded = true;
-        }
-      }
-    }
-    if (realInstalledVersion != null &&
-        app.installedVersion != null &&
         realInstalledVersion != app.installedVersion &&
         !versionDetectionIsStandard) {
       // Version detection can be disabled because the APK manifest version is
@@ -2954,6 +3021,29 @@ class AppsProvider with ChangeNotifier {
         modded = true;
       }
     }
+
+    // Auto-heal format mismatch between stored installedVersion and the active useVersionCodeAsOSVersion setting
+    if (realInstalledVersion != null &&
+        app.installedVersion != null &&
+        versionDetectionIsStandard) {
+      bool formatMismatch = false;
+      final isStoredPureInteger = RegExp(r'^\d+$').hasMatch(app.installedVersion!);
+      final isRealPureInteger = RegExp(r'^\d+$').hasMatch(realInstalledVersion);
+      if (app.additionalSettings['useVersionCodeAsOSVersion'] == true) {
+        if (!isStoredPureInteger) {
+          formatMismatch = true;
+        }
+      } else {
+        if (isStoredPureInteger && (!isRealPureInteger || realInstalledVersion != app.installedVersion)) {
+          formatMismatch = true;
+        }
+      }
+      if (formatMismatch) {
+        app.installedVersion = realInstalledVersion;
+        modded = true;
+      }
+    }
+
     // SECOND, RECONCILE DIFFERENCES BETWEEN THE APP'S REPORTED AND REAL INSTALLED VERSIONS, WHERE NEITHER IS NULL
     if (realInstalledVersion != null &&
         realInstalledVersion != app.installedVersion &&
@@ -2992,14 +3082,18 @@ class AppsProvider with ChangeNotifier {
     final bool realInstalledVersionMatchesLatest =
         realInstalledVersion != null &&
         versionsEffectivelyEqual(realInstalledVersion, app.latestVersion);
-    if (!trackOnly &&
+    final bool canAutoDisable = app.additionalSettings['versionDetection'] == 'auto' ||
+        app.additionalSettings['versionDetection'] == true ||
+        app.additionalSettings['versionDetection'] == null;
+    if (canAutoDisable &&
+        !trackOnly &&
         installedInfo != null &&
         versionDetectionIsStandard &&
         !realInstalledVersionMatchesLatest &&
         !isVersionDetectionPossible(
           AppInMemory(app, null, installedInfo, null),
         )) {
-      app.additionalSettings['versionDetection'] = false;
+      app.additionalSettings['versionDetection'] = 'pseudo';
       app.installedVersion = app.latestVersion;
       logs.add('Could not reconcile version formats for: ${app.id}');
       modded = true;

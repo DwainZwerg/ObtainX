@@ -1623,13 +1623,11 @@ class _AppPageState extends State<AppPage> {
       _attemptedApkMirrorSizeResolution = false;
       unawaited(_maybeLazyResolveApkMirrorSize());
       if (resetVersion) {
-        appsProvider.apps[id]?.app.additionalSettings['versionDetection'] =
-            true;
-        if (appsProvider.apps[id]?.app.installedVersion != null) {
-          appsProvider.apps[id]?.app.installedVersion =
-              appsProvider.apps[id]?.app.latestVersion;
+        final app = appsProvider.apps[id]?.app;
+        if (app != null) {
+          app.installedVersion = null;
+          appsProvider.saveApps([app]);
         }
-        appsProvider.saveApps([appsProvider.apps[id]!.app]);
       }
     } catch (err) {
       if (!mounted || widget.appId != id) return;
@@ -1884,7 +1882,10 @@ class _AppPageState extends State<AppPage> {
     var trackOnly = app?.app.additionalSettings['trackOnly'] == true;
 
     bool isVersionDetectionStandard =
-        app?.app.additionalSettings['versionDetection'] == true;
+        app?.app.additionalSettings['versionDetection'] == 'auto' ||
+        app?.app.additionalSettings['versionDetection'] == 'standard' ||
+        app?.app.additionalSettings['versionDetection'] == true ||
+        app?.app.additionalSettings['versionDetection'] == null;
 
     if (showAppWebpageFinal && app != null && !_webViewUrlLoaded) {
       _webViewUrlLoaded = true;

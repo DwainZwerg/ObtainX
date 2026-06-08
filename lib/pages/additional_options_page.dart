@@ -52,10 +52,15 @@ Future<bool> persistAdditionalOptionsForm({
   }
 
   final bool versionDetectionPreviouslyActive =
+      originalSettings['versionDetection'] == 'auto' ||
+      originalSettings['versionDetection'] == 'standard' ||
       originalSettings['versionDetection'] == true ||
-      !originalSettings.containsKey('versionDetection');
+      originalSettings['versionDetection'] == null;
   final bool versionDetectionCurrentlyActive =
-      app.additionalSettings['versionDetection'] == true;
+      app.additionalSettings['versionDetection'] == 'auto' ||
+      app.additionalSettings['versionDetection'] == 'standard' ||
+      app.additionalSettings['versionDetection'] == true ||
+      app.additionalSettings['versionDetection'] == null;
 
   final bool versionDetectionEnabled =
       versionDetectionCurrentlyActive && !versionDetectionPreviouslyActive;
@@ -82,7 +87,10 @@ Future<bool> persistAdditionalOptionsForm({
   }
 
   if (versionDetectionEnabled) {
-    app.additionalSettings['versionDetection'] = true;
+    if (app.additionalSettings['versionDetection'] != 'auto' &&
+        app.additionalSettings['versionDetection'] != 'standard') {
+      app.additionalSettings['versionDetection'] = 'auto';
+    }
     if (app.additionalSettings['releaseDateAsVersion'] == true) {
       app.additionalSettings['versionStringSource'] =
           versionStringSourceDefault;
@@ -100,8 +108,26 @@ Future<bool> persistAdditionalOptionsForm({
     }
   }
 
+  bool versionSettingsChanged = versionDetectionEnabled;
+  if (versionDetectionCurrentlyActive) {
+    final List<String> versionKeys = [
+      'useVersionCodeAsOSVersion',
+      'versionStringSource',
+      'versionExtractionRegEx',
+      'matchGroupToUse',
+      'releaseCommitShaAsVersion',
+    ];
+    for (final String key in versionKeys) {
+      if (originalSettings[key] != app.additionalSettings[key]) {
+        versionSettingsChanged = true;
+        app.installedVersion = null;
+        break;
+      }
+    }
+  }
+
   await appsProvider.saveApps([app], updateInstalledInfo: false);
-  return versionDetectionEnabled;
+  return versionSettingsChanged;
 }
 
 /// Full-screen editor for per-app additional options (keyboard-friendly).

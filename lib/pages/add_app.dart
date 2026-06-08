@@ -436,7 +436,8 @@ class AddAppPageState extends State<AddAppPage> {
                     true;
               }
             }
-          } else if (app.additionalSettings['versionDetection'] != true) {
+          } else if (app.additionalSettings['versionDetection'] == 'pseudo' ||
+              app.additionalSettings['versionDetection'] == false) {
             app.installedVersion = app.latestVersion;
           }
           app.categories = pickedCategories;

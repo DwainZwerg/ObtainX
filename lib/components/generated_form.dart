@@ -1,10 +1,11 @@
 import 'dart:math';
 
 import 'package:hsluv/hsluv.dart';
-import 'package:easy_localization/easy_localization.dart';
+import 'package:easy_localization/easy_localization.dart' hide TextDirection;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:obtainium/components/app_page_section_title.dart';
+import 'package:obtainium/components/app_dropdown_field.dart';
 import 'package:obtainium/components/category_action_chip.dart';
 import 'package:obtainium/components/generated_form_modal.dart';
 import 'package:obtainium/components/theme_accent_settings_section.dart';
@@ -874,7 +875,18 @@ class _ThemePinnedDropdownFormField extends StatelessWidget {
     final TextStyle? dropdownTextStyle = theme.textTheme.bodyLarge?.copyWith(
       color: scheme.onSurface,
     );
-    final Widget field = DropdownButtonFormField<dynamic>(
+    final Widget field = appDropdownField<dynamic>(
+      context: context,
+      value: value,
+      labelText: formItem.label,
+      menuWidth: appDropdownMenuWidth(
+        context,
+        (formItem.opts ?? const []).map(
+          (MapEntry<String, String> option) => option.value,
+        ),
+        style: dropdownTextStyle,
+      ),
+      borderRadius: outlinedFieldBorderRadius,
       decoration: _generatedFormDropdownDecoration(
         context: context,
         labelText: formItem.label,
@@ -882,12 +894,6 @@ class _ThemePinnedDropdownFormField extends StatelessWidget {
         externalLabels: showExternalFieldLabels,
         borderRadius: outlinedFieldBorderRadius,
       ),
-      dropdownColor: scheme.surfaceContainerHigh,
-      borderRadius: BorderRadius.circular(outlinedFieldBorderRadius),
-      style: dropdownTextStyle,
-      iconEnabledColor: scheme.onSurfaceVariant,
-      iconDisabledColor: scheme.onSurface.withValues(alpha: 0.38),
-      initialValue: value,
       items: formItem.opts!.map((MapEntry<String, String> option) {
         final bool enabled =
             formItem.disabledOptKeys?.contains(option.key) != true;

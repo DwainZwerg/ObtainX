@@ -200,14 +200,18 @@ Map<String, dynamic> appJSONCompatibilityModifiers(Map<String, dynamic> json) {
       additionalSettings.remove('releaseDateAsVersion');
     }
   }
-  // Convert dropdown style version detection options back into bool style
+  // Convert old dropdown/boolean style version detection options to new three-state string values
   if (additionalSettings['versionDetection'] == 'standardVersionDetection') {
-    additionalSettings['versionDetection'] = true;
+    additionalSettings['versionDetection'] = 'auto';
   } else if (additionalSettings['versionDetection'] == 'noVersionDetection') {
-    additionalSettings['versionDetection'] = false;
+    additionalSettings['versionDetection'] = 'pseudo';
   } else if (additionalSettings['versionDetection'] == 'releaseDateAsVersion') {
-    additionalSettings['versionDetection'] = false;
+    additionalSettings['versionDetection'] = 'pseudo';
     additionalSettings['releaseDateAsVersion'] = true;
+  } else if (additionalSettings['versionDetection'] == true) {
+    additionalSettings['versionDetection'] = 'auto';
+  } else if (additionalSettings['versionDetection'] == false) {
+    additionalSettings['versionDetection'] = 'pseudo';
   }
   syncVersionStringSourceSettings(
     additionalSettings,
@@ -970,10 +974,15 @@ abstract class AppSource {
       ),
     ],
     [
-      GeneratedFormSwitch(
+      GeneratedFormDropdown(
         'versionDetection',
-        label: tr('versionDetectionExplanation'),
-        defaultValue: true,
+        [
+          MapEntry('auto', tr('versionDetectionModeAuto')),
+          MapEntry('standard', tr('versionDetectionModeStandard')),
+          MapEntry('pseudo', tr('versionDetectionModePseudo')),
+        ],
+        label: tr('versionDetection'),
+        defaultValue: 'auto',
       ),
     ],
     [
@@ -1348,7 +1357,8 @@ String lowerCaseIfEnglish(String str) => isEnglish() ? str.toLowerCase() : str;
 bool isVersionPseudo(App app) =>
     app.additionalSettings['trackOnly'] == true ||
     (app.installedVersion != null &&
-        app.additionalSettings['versionDetection'] != true);
+        (app.additionalSettings['versionDetection'] == 'pseudo' ||
+            app.additionalSettings['versionDetection'] == false));
 
 class SourceProvider {
   static final Map<String, RegExp> _sourceRegexCache = {};
