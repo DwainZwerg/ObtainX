@@ -218,6 +218,18 @@ class AddAppPageState extends State<AddAppPage> {
     }
   }
 
+  void _resetUrlModeInput() {
+    userInput = '';
+    pickedSourceOverride = null;
+    previousPickedSourceOverride = null;
+    pickedSource = null;
+    additionalSettings = {};
+    additionalSettingsValid = true;
+    inferAppIdIfOptional = true;
+    pickedCategories = [];
+    _urlFieldController.clear();
+  }
+
   @override
   Widget build(BuildContext context) {
     AppsProvider appsProvider = context.read<AppsProvider>();
@@ -353,6 +365,7 @@ class AddAppPageState extends State<AddAppPage> {
     // ── Add app (URL mode) ─────────────────────────────────────────────
 
     addApp({bool resetUserInputAfter = false}) async {
+      bool appWasAdded = false;
       setState(() {
         gettingAppInfo = true;
       });
@@ -459,6 +472,7 @@ class AddAppPageState extends State<AddAppPage> {
           if (liveApp != null) {
             await appsProvider.assignMatchingFoldersToAppIfNeeded(liveApp);
           }
+          appWasAdded = true;
         }
         if (app != null) {
           Navigator.push(
@@ -470,12 +484,14 @@ class AddAppPageState extends State<AddAppPage> {
         if (!context.mounted) return;
         showError(e, context);
       } finally {
-        setState(() {
-          gettingAppInfo = false;
-          if (resetUserInputAfter) {
-            changeUserInput('', false, true);
-          }
-        });
+        if (mounted) {
+          setState(() {
+            gettingAppInfo = false;
+            if (appWasAdded || resetUserInputAfter) {
+              _resetUrlModeInput();
+            }
+          });
+        }
       }
     }
 
