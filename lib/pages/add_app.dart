@@ -2,6 +2,7 @@ import 'package:easy_localization/easy_localization.dart';
 import 'package:expressive_loading_indicator/expressive_loading_indicator.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:obtainium/app_sources/github.dart';
 import 'package:obtainium/components/app_page_section_title.dart';
 import 'package:obtainium/components/bulk_add_widget.dart';
 import 'package:obtainium/components/custom_app_bar.dart';
@@ -234,6 +235,8 @@ class AddAppPageState extends State<AddAppPage> {
         s.useGradientBackground,
         s.progressiveBlurEnabled,
         s.cardCornerScale,
+        s.getSettingString(GitHub.githubCredsKey),
+        s.getSettingString(GitHub.validatedPATFingerprintKey),
       ),
     );
     SettingsProvider settingsProvider = context.read<SettingsProvider>();
@@ -360,6 +363,16 @@ class AddAppPageState extends State<AddAppPage> {
             (await getReleaseDateAsVersionConfirmationIfNeeded(
               userPickedTrackOnly,
             ))) {
+          if (pickedSource is GitHub) {
+            if (!(pickedSource as GitHub).canVerifyAttestations(
+              additionalSettings,
+              settingsProvider,
+            )) {
+              additionalSettings[GitHub.buildVerificationModeKey] =
+                  GitHub.buildVerificationOff;
+            }
+            additionalSettings[GitHub.enforceAttestationsKey] = false;
+          }
           var trackOnly = pickedSource!.enforceTrackOnly || userPickedTrackOnly;
           app = await sourceProvider.getApp(
             pickedSource!,
@@ -480,6 +493,44 @@ class AddAppPageState extends State<AddAppPage> {
       };
     }
 
+    List<List<GeneratedFormItem>> buildAdditionalSettingsItems() {
+      final List<List<GeneratedFormItem>> items = cloneFormItems([
+        ...pickedSource!.combinedAppSpecificSettingFormItems,
+        ...(pickedSourceOverride != null
+            ? pickedSource!.sourceConfigSettingFormItems.map((e) => [e])
+            : []),
+      ]);
+      if (pickedSource is GitHub) {
+        final bool canVerifyGitHubBuild = (pickedSource as GitHub)
+            .canVerifyAttestations(additionalSettings, settingsProvider);
+        for (final GeneratedFormItem item in items.expand((row) => row)) {
+          if (item is GeneratedFormDropdown &&
+              item.key == GitHub.buildVerificationModeKey) {
+            if (!canVerifyGitHubBuild) {
+              item.disabledOptKeys = [
+                GitHub.buildVerificationAudit,
+                GitHub.buildVerificationEnforce,
+              ];
+              item.defaultValue = GitHub.buildVerificationOff;
+            }
+            final String? legacyMode =
+                additionalSettings[GitHub.buildVerificationModeKey]?.toString();
+            if (legacyMode == null &&
+                additionalSettings[GitHub.enforceAttestationsKey] == true &&
+                canVerifyGitHubBuild) {
+              item.defaultValue = GitHub.buildVerificationEnforce;
+            }
+          }
+        }
+      }
+      return attachRegexAssistToItems(
+        items,
+        rawLatestVersionFromSource: null,
+        rawApkNamesFromSource: null,
+        rawReleaseTitlesFromSource: null,
+      );
+    }
+
     Widget buildBottomActionFab() {
       if (urlHasInput) {
         return FloatingActionButton.extended(
@@ -526,28 +577,28 @@ class AddAppPageState extends State<AddAppPage> {
               ...sourceProvider.sources
                   .where((e) => e.name != 'RockMods')
                   .map(
-                (e) => Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4),
-                  child: InkWell(
-                    onTap: e.hosts.isNotEmpty
-                        ? () {
-                            launchUrlString(
-                              'https://${e.hosts[0]}',
-                              mode: LaunchMode.externalApplication,
-                            );
-                          }
-                        : null,
-                    child: Text(
-                      '${e.name}${e.enforceTrackOnly ? ' ${tr('trackOnlyInBrackets')}' : ''}${e.canSearch ? ' ${tr('searchableInBrackets')}' : ''}',
-                      style: TextStyle(
-                        decoration: e.hosts.isNotEmpty
-                            ? TextDecoration.underline
-                            : TextDecoration.none,
+                    (e) => Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: InkWell(
+                        onTap: e.hosts.isNotEmpty
+                            ? () {
+                                launchUrlString(
+                                  'https://${e.hosts[0]}',
+                                  mode: LaunchMode.externalApplication,
+                                );
+                              }
+                            : null,
+                        child: Text(
+                          '${e.name}${e.enforceTrackOnly ? ' ${tr('trackOnlyInBrackets')}' : ''}${e.canSearch ? ' ${tr('searchableInBrackets')}' : ''}',
+                          style: TextStyle(
+                            decoration: e.hosts.isNotEmpty
+                                ? TextDecoration.underline
+                                : TextDecoration.none,
+                          ),
+                        ),
                       ),
                     ),
                   ),
-                ),
-              ),
               const SizedBox(height: 16),
               Text(
                 '${tr('note')}:',
@@ -730,17 +781,7 @@ class AddAppPageState extends State<AddAppPage> {
             outlinedInputFields: true,
             prominentSectionHeaders: true,
             wrapFormSectionsInCards: true,
-            items: attachRegexAssistToItems(
-              cloneFormItems([
-                ...pickedSource!.combinedAppSpecificSettingFormItems,
-                ...(pickedSourceOverride != null
-                    ? pickedSource!.sourceConfigSettingFormItems.map((e) => [e])
-                    : []),
-              ]),
-              rawLatestVersionFromSource: null,
-              rawApkNamesFromSource: null,
-              rawReleaseTitlesFromSource: null,
-            ),
+            items: buildAdditionalSettingsItems(),
             onValueChanges: (values, valid, isBuilding) {
               if (!isBuilding) {
                 setState(() {

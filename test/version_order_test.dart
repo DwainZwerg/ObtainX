@@ -2,6 +2,7 @@ import 'package:flutter_test/flutter_test.dart';
 // ignore: depend_on_referenced_packages
 import 'package:device_info_plus_platform_interface/device_info_plus_platform_interface.dart';
 import 'package:android_package_manager/android_package_manager.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart';
 import 'package:obtainium/app_sources/apkmirror.dart';
 import 'package:obtainium/app_sources/fdroid.dart';
@@ -196,6 +197,22 @@ void main() {
       );
     },
   );
+
+  test('release package lookup only includes debug build when requested', () {
+    expect(
+      packageNamesToTryForInstalledInfo('dev.bikram.obtainx'),
+      const ['dev.bikram.obtainx'],
+    );
+    expect(
+      packageNamesToTryForInstalledInfo(
+        'dev.bikram.obtainx',
+        includeOwnDebugBuild: true,
+      ),
+      kDebugMode
+          ? const ['dev.bikram.obtainx.debug', 'dev.bikram.obtainx']
+          : const ['dev.bikram.obtainx'],
+    );
+  });
 
   test('legacy release-date microseconds compare with ISO release dates', () {
     expect(

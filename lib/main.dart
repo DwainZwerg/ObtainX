@@ -417,7 +417,7 @@ class _ObtainiumState extends State<Obtainium> {
         logs.add('This is the first ever run of ObtainX.');
         // If this is the first run, add ObtainX to the Apps list
         if (!fdroid) {
-          getInstalledInfo(obtainiumId)
+          getInstalledInfo(obtainiumId, includeOwnDebugBuild: true)
               .then((value) {
                 if (value?.versionName != null) {
                   appsProvider.saveApps([

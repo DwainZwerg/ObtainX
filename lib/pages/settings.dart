@@ -16,6 +16,7 @@ import 'package:obtainium/components/generated_form.dart';
 import 'package:obtainium/components/generated_form_modal.dart';
 import 'package:obtainium/custom_errors.dart';
 import 'package:obtainium/main.dart';
+import 'package:obtainium/app_sources/github.dart';
 import 'package:obtainium/providers/apps_provider.dart';
 import 'package:obtainium/providers/installer_provider.dart' as installer;
 import 'package:obtainium/providers/logs_provider.dart';
@@ -443,15 +444,27 @@ class _SettingsPageState extends State<SettingsPage> {
           return GeneratedForm(
             outlinedInputFields: true,
             items: source.sourceConfigSettingFormItems.map((item) {
-              if (item is GeneratedFormSwitch) {
-                item.defaultValue = settingsProvider.getSettingBool(item.key);
+              final GeneratedFormItem formItem = item.clone();
+              if (formItem is GeneratedFormSwitch) {
+                formItem.defaultValue = settingsProvider.getSettingBool(
+                  formItem.key,
+                );
               } else {
-                item.defaultValue = settingsProvider.getSettingString(item.key);
+                formItem.defaultValue = settingsProvider.getSettingString(
+                  formItem.key,
+                );
               }
-              return [item];
+              return [formItem];
             }).toList(),
             onValueChanges: (values, valid, isBuilding) {
               if (valid && !isBuilding) {
+                if (source is GitHub) {
+                  final String? githubCreds = values[GitHub.githubCredsKey]
+                      ?.toString();
+                  if (!GitHub.hasValidatedPAT(githubCreds, settingsProvider)) {
+                    GitHub.clearPATValidation(settingsProvider);
+                  }
+                }
                 values.forEach((key, value) {
                   final formItem = source.sourceConfigSettingFormItems
                       .where((i) => i.key == key)
@@ -1295,7 +1308,11 @@ class _AboutSectionContent extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           FutureBuilder<PackageInfo?>(
-            future: getInstalledInfo(obtainiumId, printErr: false),
+            future: getInstalledInfo(
+              obtainiumId,
+              printErr: false,
+              includeOwnDebugBuild: true,
+            ),
             builder: (context, snapshot) {
               final String versionName =
                   snapshot.data?.versionName ?? tr('unknown');
@@ -1807,6 +1824,7 @@ class _LogsDialogState extends State<LogsDialog> {
         final packageInfo = await getInstalledInfo(
           obtainiumId,
           printErr: false,
+          includeOwnDebugBuild: true,
         );
         buffer.writeln(
           'App Version: ${packageInfo?.versionName ?? 'Unknown'} (code ${packageInfo?.versionCode ?? 'unknown'})',

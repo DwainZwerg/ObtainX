@@ -49,6 +49,78 @@ class AppNames {
   AppNames(this.author, this.name);
 }
 
+const String githubAttestationStatusVerified = 'verified';
+const String githubAttestationStatusUnsupported = 'unsupported';
+const String githubAttestationStatusError = 'error';
+
+const Set<String> validGitHubAttestationStatuses = {
+  githubAttestationStatusVerified,
+  githubAttestationStatusUnsupported,
+  githubAttestationStatusError,
+};
+
+const String reproducibleBuildStatusVerified = 'verified';
+const String reproducibleBuildStatusNotReproducible = 'not_reproducible';
+const String reproducibleBuildStatusNoData = 'no_data';
+const String reproducibleBuildStatusError = 'error';
+
+const Set<String> validReproducibleBuildStatuses = {
+  reproducibleBuildStatusVerified,
+  reproducibleBuildStatusNotReproducible,
+  reproducibleBuildStatusNoData,
+  reproducibleBuildStatusError,
+};
+
+String? githubAttestationStatusFromJsonValue(Object? value) {
+  if (value is String && validGitHubAttestationStatuses.contains(value)) {
+    return value;
+  }
+  if (value is bool) {
+    return value
+        ? githubAttestationStatusVerified
+        : githubAttestationStatusUnsupported;
+  }
+  return null;
+}
+
+String? reproducibleBuildStatusFromJsonValue(Object? value) {
+  if (value is String && validReproducibleBuildStatuses.contains(value)) {
+    return value;
+  }
+  if (value is bool) {
+    return value
+        ? reproducibleBuildStatusVerified
+        : reproducibleBuildStatusNotReproducible;
+  }
+  return null;
+}
+
+String reproducibleBuildStatusFromBool(bool? value) {
+  if (value == true) {
+    return reproducibleBuildStatusVerified;
+  }
+  if (value == false) {
+    return reproducibleBuildStatusNotReproducible;
+  }
+  return reproducibleBuildStatusNoData;
+}
+
+bool? reproducibleBuildBoolFromStatus(String? status) {
+  if (status == reproducibleBuildStatusVerified) {
+    return true;
+  }
+  if (status == reproducibleBuildStatusNotReproducible) {
+    return false;
+  }
+  return null;
+}
+
+bool looksLikeAndroidPackageId(String value) {
+  return RegExp(
+    r'^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$',
+  ).hasMatch(value.trim());
+}
+
 class APKDetails {
   late String version;
   late List<MapEntry<String, String>> apkUrls;
@@ -65,6 +137,9 @@ class APKDetails {
 
   /// Size of the preferred APK in bytes, if known at update-check time (e.g. GitHub releases).
   int? apkSizeBytes;
+  bool? isReproducible;
+  String? reproducibleStatus;
+  String? attestationStatus;
 
   APKDetails(
     this.version,
@@ -76,6 +151,9 @@ class APKDetails {
     this.iconUrl,
     this.rawReleaseTitleCandidates = const [],
     this.apkSizeBytes,
+    this.isReproducible,
+    this.reproducibleStatus,
+    this.attestationStatus,
   });
 }
 
@@ -447,6 +525,9 @@ class App {
   /// Size of the preferred APK in bytes, if known at update-check time.
   int? apkSizeBytes;
   String? pendingRepoRenameUrl;
+  bool? latestIsReproducible;
+  String? latestReproducibleStatus;
+  String? latestAttestationStatus;
   App(
     this.id,
     this.url,
@@ -471,6 +552,9 @@ class App {
     this.rawReleaseTitlesFromSource,
     this.apkSizeBytes,
     this.pendingRepoRenameUrl,
+    this.latestIsReproducible,
+    this.latestReproducibleStatus,
+    this.latestAttestationStatus,
   });
 
   @override
@@ -481,10 +565,22 @@ class App {
   bool get hasPendingRepoRename =>
       pendingRepoRenameUrl != null && pendingRepoRenameUrl!.isNotEmpty;
 
-  String? get overrideName =>
-      additionalSettings['appName']?.toString().trim().isNotEmpty == true
-      ? additionalSettings['appName']
-      : null;
+  String? get overrideName {
+    final String? override = additionalSettings['appName']?.toString().trim();
+    if (override?.isNotEmpty != true) {
+      return null;
+    }
+    final String sourceName = name.trim();
+    if (override == id && sourceName.isNotEmpty && sourceName != id) {
+      return null;
+    }
+    if (looksLikeAndroidPackageId(override!) &&
+        sourceName.isNotEmpty &&
+        sourceName != override) {
+      return null;
+    }
+    return override;
+  }
 
   String get finalName {
     return overrideName ?? name;
@@ -523,6 +619,9 @@ class App {
     rawReleaseTitlesFromSource: rawReleaseTitlesFromSource,
     apkSizeBytes: apkSizeBytes,
     pendingRepoRenameUrl: pendingRepoRenameUrl,
+    latestIsReproducible: latestIsReproducible,
+    latestReproducibleStatus: latestReproducibleStatus,
+    latestAttestationStatus: latestAttestationStatus,
   );
 
   factory App.fromJson(Map<String, dynamic> json) {
@@ -571,6 +670,13 @@ class App {
       rawReleaseTitlesFromSource: json['rawReleaseTitlesFromSource'] as String?,
       apkSizeBytes: json['apkSizeBytes'] as int?,
       pendingRepoRenameUrl: json['pendingRepoRenameUrl'] as String?,
+      latestIsReproducible: json['latestIsReproducible'] as bool?,
+      latestReproducibleStatus: reproducibleBuildStatusFromJsonValue(
+        json['latestReproducibleStatus'] ?? json['latestIsReproducible'],
+      ),
+      latestAttestationStatus: githubAttestationStatusFromJsonValue(
+        json['latestAttestationStatus'] ?? json['latestIsAttested'],
+      ),
     );
   }
 
@@ -601,6 +707,12 @@ class App {
       'rawReleaseTitlesFromSource': rawReleaseTitlesFromSource,
     if (apkSizeBytes != null) 'apkSizeBytes': apkSizeBytes,
     'pendingRepoRenameUrl': pendingRepoRenameUrl,
+    if (latestIsReproducible != null)
+      'latestIsReproducible': latestIsReproducible,
+    if (latestReproducibleStatus != null)
+      'latestReproducibleStatus': latestReproducibleStatus,
+    if (latestAttestationStatus != null)
+      'latestAttestationStatus': latestAttestationStatus,
   };
 }
 
@@ -1519,8 +1631,22 @@ class SourceProvider {
     if (additionalSettings['autoApkFilterByArch'] == true) {
       apk.apkUrls = await filterApksByArch(apk.apkUrls);
     }
+    final String sourceName = apk.names.name.trim();
     var name = currentApp != null ? currentApp.name.trim() : '';
-    name = name.isNotEmpty ? name : apk.names.name;
+    if (name.isEmpty ||
+        name == currentApp?.id ||
+        (looksLikeAndroidPackageId(name) &&
+            sourceName.isNotEmpty &&
+            sourceName != name)) {
+      name = sourceName.isNotEmpty ? sourceName : name;
+    }
+    final String? resolvedReproducibleStatus =
+        apk.reproducibleStatus ??
+        (apk.isReproducible != null
+            ? reproducibleBuildStatusFromBool(apk.isReproducible)
+            : currentApp != null && currentApp.latestVersion == apk.version
+            ? currentApp.latestReproducibleStatus
+            : null);
     App finalApp = App(
       currentApp?.id ??
           ((additionalSettings['appId'] != null)
@@ -1574,6 +1700,15 @@ class SourceProvider {
           apk.apkSizeBytes ??
           (currentApp != null && currentApp.latestVersion == apk.version
               ? currentApp.apkSizeBytes
+              : null),
+      latestIsReproducible: reproducibleBuildBoolFromStatus(
+        resolvedReproducibleStatus,
+      ),
+      latestReproducibleStatus: resolvedReproducibleStatus,
+      latestAttestationStatus:
+          apk.attestationStatus ??
+          (currentApp != null && currentApp.latestVersion == apk.version
+              ? currentApp.latestAttestationStatus
               : null),
     );
     return source.endOfGetAppChanges(finalApp);

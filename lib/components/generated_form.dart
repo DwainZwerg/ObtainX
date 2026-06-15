@@ -43,6 +43,8 @@ class GeneratedFormTextField extends GeneratedFormItem {
   late TextInputType? textInputType;
   late List<String>? autoCompleteOptions;
   GeneratedFormTextFieldAssist? assistAction;
+  IconData assistIcon;
+  String? assistTooltip;
   Widget? suffixIcon;
 
   GeneratedFormTextField(
@@ -58,6 +60,8 @@ class GeneratedFormTextField extends GeneratedFormItem {
     this.textInputType,
     this.autoCompleteOptions,
     this.assistAction,
+    this.assistIcon = Icons.auto_fix_high_outlined,
+    this.assistTooltip,
     this.suffixIcon,
   });
 
@@ -81,6 +85,8 @@ class GeneratedFormTextField extends GeneratedFormItem {
       textInputType: textInputType,
       autoCompleteOptions: autoCompleteOptions,
       assistAction: assistAction,
+      assistIcon: assistIcon,
+      assistTooltip: assistTooltip,
       suffixIcon: suffixIcon,
     );
   }
@@ -89,6 +95,7 @@ class GeneratedFormTextField extends GeneratedFormItem {
 class GeneratedFormDropdown extends GeneratedFormItem {
   late List<MapEntry<String, String>>? opts;
   List<String>? disabledOptKeys;
+  String? labelTooltip;
 
   GeneratedFormDropdown(
     super.key,
@@ -97,6 +104,7 @@ class GeneratedFormDropdown extends GeneratedFormItem {
     super.belowWidgets,
     String super.defaultValue = '',
     this.disabledOptKeys,
+    this.labelTooltip,
     List<String? Function(String? value)> super.additionalValidators = const [],
   });
 
@@ -116,6 +124,7 @@ class GeneratedFormDropdown extends GeneratedFormItem {
       disabledOptKeys: disabledOptKeys != null
           ? List.from(disabledOptKeys!)
           : null,
+      labelTooltip: labelTooltip,
       additionalValidators: List.from(additionalValidators),
     );
   }
@@ -131,7 +140,7 @@ class GeneratedFormSwitch extends GeneratedFormItem {
     super.label,
     super.belowWidgets,
     bool super.defaultValue = false,
-    bool disabled = false,
+    this.disabled = false,
     this.labelTooltip,
     this.turnsOffKeys = const [],
     List<String? Function(bool value)> super.additionalValidators = const [],
@@ -149,7 +158,7 @@ class GeneratedFormSwitch extends GeneratedFormItem {
       label: label,
       belowWidgets: belowWidgets,
       defaultValue: defaultValue,
-      disabled: false,
+      disabled: disabled,
       labelTooltip: labelTooltip,
       turnsOffKeys: List.from(turnsOffKeys),
       additionalValidators: List.from(additionalValidators),
@@ -872,6 +881,14 @@ class _ThemePinnedDropdownFormField extends StatelessWidget {
     final ColorScheme scheme = theme.colorScheme;
     final bool showExternalFieldLabels =
         outlinedInputFields && outlinedFieldsExternalLabels;
+    final Widget? helpIcon =
+        formItem.labelTooltip != null && formItem.labelTooltip!.isNotEmpty
+        ? HelpHintIcon(
+            message: formItem.labelTooltip!,
+            size: 18,
+            padding: EdgeInsets.zero,
+          )
+        : null;
     final TextStyle? dropdownTextStyle = theme.textTheme.bodyLarge?.copyWith(
       color: scheme.onSurface,
     );
@@ -912,15 +929,38 @@ class _ThemePinnedDropdownFormField extends StatelessWidget {
         children: [
           Padding(
             padding: const EdgeInsets.only(left: 2, bottom: 6),
-            child: Text(
-              formItem.label,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: scheme.onSurfaceVariant,
-                fontWeight: FontWeight.w600,
-              ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    formItem.label,
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                if (helpIcon != null) ...[const SizedBox(width: 6), helpIcon],
+              ],
             ),
           ),
           field,
+        ],
+      );
+    }
+    if (helpIcon != null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          field,
+          Align(
+            alignment: AlignmentDirectional.centerEnd,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: helpIcon,
+            ),
+          ),
         ],
       );
     }
@@ -1030,7 +1070,7 @@ class _GeneratedFormState extends State<GeneratedForm> {
   // If any value changes, call this to update the parent with value and validity
   void someValueChanged({bool isBuilding = false, bool forceInvalid = false}) {
     Map<String, dynamic> returnValues = values;
-    var valid = true;
+    var valid = _formKey.currentState?.validate() ?? true;
     for (int r = 0; r < formInputs.length; r++) {
       for (int i = 0; i < formInputs[r].length; i++) {
         if (formInputs[r][i] is TextFormField) {
@@ -1118,8 +1158,10 @@ class _GeneratedFormState extends State<GeneratedForm> {
                       (formItem.assistAction == null
                           ? null
                           : IconButton(
-                              tooltip: tr('regexAssistTooltip'),
-                              icon: const Icon(Icons.auto_fix_high_outlined),
+                              tooltip:
+                                  formItem.assistTooltip ??
+                                  tr('regexAssistTooltip'),
+                              icon: Icon(formItem.assistIcon),
                               onPressed: () async {
                                 await formItem.assistAction!(
                                   context,
@@ -1306,37 +1348,67 @@ class _GeneratedFormState extends State<GeneratedForm> {
                   padding: EdgeInsets.zero,
                 )
               : null;
-          formInputs[r][e] = Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Expanded(
-                child: Text(
-                  switchItem.label,
-                  style: Theme.of(context).textTheme.bodyLarge,
-                ),
-              ),
-              if (switchHelpIcon != null)
-                switchHelpIcon
-              else
-                const SizedBox(width: 8),
-              Switch(
-                value: values[fieldKey],
-                onChanged: switchItem.disabled
-                    ? null
-                    : (value) {
-                        setState(() {
-                          values[fieldKey] = value;
-                          if (value) {
-                            for (final String targetKey
-                                in switchItem.turnsOffKeys) {
-                              values[targetKey] = false;
-                            }
-                          }
-                          someValueChanged();
-                        });
-                      },
-              ),
-            ],
+          formInputs[r][e] = FormField<bool>(
+            initialValue: values[fieldKey],
+            validator: (value) {
+              for (var validator in switchItem.additionalValidators) {
+                final String? result = validator(value == true);
+                if (result != null) {
+                  return result;
+                }
+              }
+              return null;
+            },
+            builder: (field) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      Expanded(
+                        child: Text(
+                          switchItem.label,
+                          style: Theme.of(context).textTheme.bodyLarge,
+                        ),
+                      ),
+                      if (switchHelpIcon != null)
+                        switchHelpIcon
+                      else
+                        const SizedBox(width: 8),
+                      Switch(
+                        value: values[fieldKey],
+                        onChanged: switchItem.disabled
+                            ? null
+                            : (value) {
+                                setState(() {
+                                  values[fieldKey] = value;
+                                  field.didChange(value);
+                                  if (value) {
+                                    for (final String targetKey
+                                        in switchItem.turnsOffKeys) {
+                                      values[targetKey] = false;
+                                    }
+                                  }
+                                  someValueChanged();
+                                });
+                              },
+                      ),
+                    ],
+                  ),
+                  if (field.hasError)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        field.errorText!,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: Theme.of(context).colorScheme.error,
+                        ),
+                      ),
+                    ),
+                ],
+              );
+            },
           );
         } else if (widget.items[r][e] is GeneratedFormTagInput) {
           // Capture the form item here so that closures defined below don't
