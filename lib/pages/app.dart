@@ -10,10 +10,7 @@ import 'package:flutter/services.dart';
 import 'package:fluttertoast/fluttertoast.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:obtainium/app_sources/apkmirror.dart';
-import 'package:obtainium/app_sources/fdroid.dart';
-import 'package:obtainium/app_sources/fdroidrepo.dart';
 import 'package:obtainium/app_sources/github.dart';
-import 'package:obtainium/app_sources/izzyondroid.dart';
 import 'package:obtainium/components/app_page_section_title.dart';
 import 'package:obtainium/components/category_action_chip.dart';
 import 'package:obtainium/pages/additional_options_page.dart';
@@ -831,9 +828,14 @@ class _AppPageState extends State<AppPage> {
   Widget _buildPersistentPageError(
     BuildContext ctx,
     ThemeData pageTheme,
-    String? error,
-  ) {
-    if (error == null || error.isEmpty) return const SizedBox.shrink();
+    String? error, {
+    String? title,
+  }) {
+    if ((title == null || title.isEmpty) && (error == null || error.isEmpty)) {
+      return const SizedBox.shrink();
+    }
+    final bool showErrorDetails =
+        title == null && error != null && error.isNotEmpty;
 
     final BoxDecoration baseDecoration = appPageSectionCardDecoration(ctx);
     final ColorScheme colorScheme = pageTheme.colorScheme;
@@ -877,20 +879,24 @@ class _AppPageState extends State<AppPage> {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    tr('errorCheckingUpdates'),
+                    title ?? tr('errorCheckingUpdates'),
                     style: textTheme.labelLarge?.copyWith(
                       color: colorScheme.onSurface,
-                      fontWeight: FontWeight.w700,
+                      fontWeight: title == null
+                          ? FontWeight.w700
+                          : FontWeight.normal,
                     ),
                   ),
-                  const SizedBox(height: 3),
-                  SelectableText(
-                    error,
-                    style: textTheme.bodySmall?.copyWith(
-                      color: colorScheme.onSurfaceVariant,
-                      height: 1.3,
+                  if (showErrorDetails) ...[
+                    const SizedBox(height: 3),
+                    SelectableText(
+                      error,
+                      style: textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                        height: 1.3,
+                      ),
                     ),
-                  ),
+                  ],
                 ],
               ),
             ),
@@ -1799,6 +1805,22 @@ class _AppPageState extends State<AppPage> {
             overrideSource: app.app.overrideSource,
           )
         : null;
+    final String? buildVerificationPersistentPageError =
+        app != null &&
+            source != null &&
+            buildVerificationEnforcementBlocksInstall(
+              app.app,
+              source,
+              settingsProvider,
+            )
+        ? buildVerificationEnforcedBlockedMessage(
+            app.app,
+            source,
+            settingsProvider,
+          )
+        : null;
+    final String? effectivePersistentPageError =
+        buildVerificationPersistentPageError ?? persistentPageError;
 
     final Uint8List? iconBytes = app?.icon;
     final Brightness themeBrightness = Theme.of(context).brightness;
@@ -2547,28 +2569,33 @@ class _AppPageState extends State<AppPage> {
         }
       }
 
-      final bool reproducibleBuildEnforced =
-          app?.app.additionalSettings['enforceReproducibleBuilds'] == true &&
-          (source is FDroid || source is FDroidRepo || source is IzzyOnDroid);
+      final bool reproducibleBuildExpected =
+          source != null && reproducibleBuildVerificationApplies(source);
       final String? reproducibleBuildStatus =
           app?.app.latestReproducibleStatus ??
           (app?.app.latestIsReproducible != null
               ? reproducibleBuildStatusFromBool(app!.app.latestIsReproducible)
               : null);
       final bool reproducibleBuildVerified =
+          reproducibleBuildExpected &&
           reproducibleBuildStatus == reproducibleBuildStatusVerified;
-      final bool reproducibleBuildFailed =
-          reproducibleBuildEnforced &&
+      final bool reproducibleBuildNotReproducible =
+          reproducibleBuildExpected &&
           reproducibleBuildStatus == reproducibleBuildStatusNotReproducible;
       final bool reproducibleBuildNoData =
-          reproducibleBuildEnforced &&
+          reproducibleBuildExpected &&
           reproducibleBuildStatus == reproducibleBuildStatusNoData;
       final bool reproducibleBuildUnknown =
-          reproducibleBuildEnforced &&
+          reproducibleBuildExpected &&
           (reproducibleBuildStatus == reproducibleBuildStatusError ||
               reproducibleBuildStatus == null);
       final bool reproducibleBuildBlocked =
-          reproducibleBuildFailed ||
+          app != null &&
+          source != null &&
+          reproducibleBuildEnforcementBlocksInstall(app.app, source);
+      final bool reproducibleBuildHasDisplayStatus =
+          reproducibleBuildVerified ||
+          reproducibleBuildNotReproducible ||
           reproducibleBuildNoData ||
           reproducibleBuildUnknown;
       final bool githubAttestationExpected =
@@ -2577,34 +2604,57 @@ class _AppPageState extends State<AppPage> {
             app?.app.additionalSettings ?? <String, dynamic>{},
             settingsProvider,
           );
-      final bool githubAttestationEnforced =
-          source is GitHub &&
-          source.shouldEnforceAttestations(
-            app?.app.additionalSettings ?? <String, dynamic>{},
-            settingsProvider,
-          );
       final String? githubAttestationStatus = app?.app.latestAttestationStatus;
       final bool githubAttestationBlocked =
-          githubAttestationEnforced &&
-          githubAttestationStatus != null &&
-          githubAttestationStatus != githubAttestationStatusVerified;
+          app != null &&
+          source != null &&
+          githubAttestationEnforcementBlocksInstall(
+            app.app,
+            source,
+            settingsProvider,
+          );
       final bool githubAttestationVerified =
           githubAttestationExpected &&
           githubAttestationStatus == githubAttestationStatusVerified;
       final bool githubAttestationUnsupported =
           githubAttestationExpected &&
           githubAttestationStatus == githubAttestationStatusUnsupported;
-      final bool githubAttestationError =
+      final bool githubAttestationCantCheck =
           githubAttestationExpected &&
-          githubAttestationStatus == githubAttestationStatusError;
+          (githubAttestationStatus == githubAttestationStatusError ||
+              githubAttestationStatus == null);
       final bool githubAttestationHasStatus =
           githubAttestationVerified ||
           githubAttestationUnsupported ||
-          githubAttestationError;
+          githubAttestationCantCheck;
+      final bool reproducibleBuildUsesErrorColors =
+          reproducibleBuildBlocked && reproducibleBuildNotReproducible;
+      final Color reproducibleBuildProblemContainerColor =
+          reproducibleBuildUnknown
+          ? Colors.orange.withValues(alpha: 0.16)
+          : reproducibleBuildUsesErrorColors
+          ? Theme.of(
+              pageThemeContext,
+            ).colorScheme.errorContainer.withValues(alpha: 0.55)
+          : Theme.of(
+              pageThemeContext,
+            ).colorScheme.surfaceContainerHighest.withValues(alpha: 0.75);
+      final Color reproducibleBuildProblemBorderColor = reproducibleBuildUnknown
+          ? Colors.orange.withValues(alpha: 0.55)
+          : reproducibleBuildUsesErrorColors
+          ? Theme.of(pageThemeContext).colorScheme.error.withValues(alpha: 0.55)
+          : Theme.of(
+              pageThemeContext,
+            ).colorScheme.outline.withValues(alpha: 0.45);
+      final Color reproducibleBuildProblemContentColor =
+          reproducibleBuildUnknown
+          ? Colors.orange.shade800
+          : reproducibleBuildUsesErrorColors
+          ? Theme.of(pageThemeContext).colorScheme.onErrorContainer
+          : Theme.of(pageThemeContext).colorScheme.onSurfaceVariant;
       if (app != null &&
-          (reproducibleBuildVerified ||
+          (reproducibleBuildHasDisplayStatus ||
               githubAttestationHasStatus ||
-              reproducibleBuildBlocked ||
               githubAttestationBlocked)) {
         versionCardChildren.add(
           Padding(
@@ -2704,36 +2754,19 @@ class _AppPageState extends State<AppPage> {
                             ],
                           ),
                         ),
-                      if (reproducibleBuildBlocked)
+                      if (reproducibleBuildNotReproducible ||
+                          reproducibleBuildNoData ||
+                          reproducibleBuildUnknown)
                         Container(
                           padding: const EdgeInsets.symmetric(
                             horizontal: 10,
                             vertical: 4,
                           ),
                           decoration: BoxDecoration(
-                            color: reproducibleBuildUnknown
-                                ? Colors.orange.withValues(alpha: 0.16)
-                                : reproducibleBuildNoData
-                                ? Theme.of(pageThemeContext)
-                                      .colorScheme
-                                      .surfaceContainerHighest
-                                      .withValues(alpha: 0.75)
-                                : Theme.of(pageThemeContext)
-                                      .colorScheme
-                                      .errorContainer
-                                      .withValues(alpha: 0.55),
+                            color: reproducibleBuildProblemContainerColor,
                             borderRadius: BorderRadius.circular(8),
                             border: Border.all(
-                              color: reproducibleBuildUnknown
-                                  ? Colors.orange.withValues(alpha: 0.55)
-                                  : reproducibleBuildNoData
-                                  ? Theme.of(pageThemeContext)
-                                        .colorScheme
-                                        .outline
-                                        .withValues(alpha: 0.45)
-                                  : Theme.of(
-                                      pageThemeContext,
-                                    ).colorScheme.error.withValues(alpha: 0.55),
+                              color: reproducibleBuildProblemBorderColor,
                             ),
                           ),
                           child: Row(
@@ -2746,15 +2779,7 @@ class _AppPageState extends State<AppPage> {
                                     ? Icons.shield_outlined
                                     : Icons.gpp_bad_outlined,
                                 size: 12,
-                                color: reproducibleBuildUnknown
-                                    ? Colors.orange.shade800
-                                    : reproducibleBuildNoData
-                                    ? Theme.of(
-                                        pageThemeContext,
-                                      ).colorScheme.onSurfaceVariant
-                                    : Theme.of(
-                                        pageThemeContext,
-                                      ).colorScheme.onErrorContainer,
+                                color: reproducibleBuildProblemContentColor,
                               ),
                               const SizedBox(width: 4),
                               Text(
@@ -2769,15 +2794,8 @@ class _AppPageState extends State<AppPage> {
                                     .textTheme
                                     .labelSmall
                                     ?.copyWith(
-                                      color: reproducibleBuildUnknown
-                                          ? Colors.orange.shade800
-                                          : reproducibleBuildNoData
-                                          ? Theme.of(
-                                              pageThemeContext,
-                                            ).colorScheme.onSurfaceVariant
-                                          : Theme.of(
-                                              pageThemeContext,
-                                            ).colorScheme.onErrorContainer,
+                                      color:
+                                          reproducibleBuildProblemContentColor,
                                       fontWeight: FontWeight.w600,
                                     ),
                               ),
@@ -2785,14 +2803,14 @@ class _AppPageState extends State<AppPage> {
                           ),
                         ),
                       if (githubAttestationUnsupported ||
-                          githubAttestationError)
+                          githubAttestationCantCheck)
                         Container(
                           padding: const EdgeInsets.symmetric(
                             horizontal: 10,
                             vertical: 4,
                           ),
                           decoration: BoxDecoration(
-                            color: githubAttestationError
+                            color: githubAttestationCantCheck
                                 ? Colors.orange.withValues(alpha: 0.16)
                                 : githubAttestationUnsupported
                                 ? Theme.of(pageThemeContext)
@@ -2802,7 +2820,7 @@ class _AppPageState extends State<AppPage> {
                                 : Colors.transparent,
                             borderRadius: BorderRadius.circular(8),
                             border: Border.all(
-                              color: githubAttestationError
+                              color: githubAttestationCantCheck
                                   ? Colors.orange.withValues(alpha: 0.55)
                                   : githubAttestationUnsupported
                                   ? Theme.of(pageThemeContext)
@@ -2816,11 +2834,11 @@ class _AppPageState extends State<AppPage> {
                             mainAxisSize: MainAxisSize.min,
                             children: [
                               Icon(
-                                githubAttestationError
+                                githubAttestationCantCheck
                                     ? Icons.warning_amber_rounded
                                     : Icons.shield_outlined,
                                 size: 12,
-                                color: githubAttestationError
+                                color: githubAttestationCantCheck
                                     ? Colors.orange.shade800
                                     : githubAttestationUnsupported
                                     ? Theme.of(
@@ -2833,7 +2851,7 @@ class _AppPageState extends State<AppPage> {
                               const SizedBox(width: 4),
                               Text(
                                 tr(
-                                  githubAttestationError
+                                  githubAttestationCantCheck
                                       ? 'verificationCantCheck'
                                       : 'unverifiedBuild',
                                 ),
@@ -2841,7 +2859,7 @@ class _AppPageState extends State<AppPage> {
                                     .textTheme
                                     .labelSmall
                                     ?.copyWith(
-                                      color: githubAttestationError
+                                      color: githubAttestationCantCheck
                                           ? Colors.orange.shade800
                                           : githubAttestationUnsupported
                                           ? Theme.of(
@@ -3568,6 +3586,23 @@ class _AppPageState extends State<AppPage> {
       }
 
       final bool actionBlocked = updating || areDownloadsRunning;
+      final bool buildVerificationBlocked =
+          app != null &&
+          source != null &&
+          buildVerificationEnforcementBlocksInstall(
+            app.app,
+            source,
+            settingsProvider,
+          );
+      final String? buildVerificationBlockedMessage = buildVerificationBlocked
+          ? buildVerificationEnforcedBlockedMessage(
+              app.app,
+              source,
+              settingsProvider,
+            )
+          : null;
+      final bool installActionBlocked =
+          actionBlocked || buildVerificationBlocked;
       final installedVersion = app?.app.installedVersion;
       final bool installedVersionIsNull = installedVersion == null;
       final bool actionableUpdate =
@@ -3586,7 +3621,7 @@ class _AppPageState extends State<AppPage> {
       // "mark as latest" second button (mutually exclusive with actionableUpdate).
       final bool uncertainOnly = uncertainUpdate;
       final bool primaryActionEnabled =
-          !actionBlocked &&
+          !installActionBlocked &&
           (installedVersionIsNull ||
               ((actionableUpdate || uncertainUpdate) && !skipActive));
       final bool trackedFromApkMirror =
@@ -3645,6 +3680,13 @@ class _AppPageState extends State<AppPage> {
       }
 
       Future<void> runInstallOrMarkUpdated() async {
+        if (buildVerificationBlocked) {
+          _showPageError(
+            ObtainiumError(buildVerificationBlockedMessage!),
+            context,
+          );
+          return;
+        }
         try {
           final successMessage = installedVersionIsNull
               ? tr('installed')
@@ -3687,7 +3729,7 @@ class _AppPageState extends State<AppPage> {
                 Expanded(
                   child: FilledButton(
                     style: expressiveFilled,
-                    onPressed: actionBlocked || skipActive
+                    onPressed: installActionBlocked || skipActive
                         ? null
                         : openTrackOnlyReleasePage,
                     child: FittedBox(
@@ -3705,7 +3747,9 @@ class _AppPageState extends State<AppPage> {
                 Expanded(
                   child: FilledButton(
                     style: expressiveFilled,
-                    onPressed: actionBlocked ? null : runInstallOrMarkUpdated,
+                    onPressed: installActionBlocked
+                        ? null
+                        : runInstallOrMarkUpdated,
                     child: FittedBox(
                       fit: BoxFit.scaleDown,
                       alignment: Alignment.center,
@@ -3727,7 +3771,7 @@ class _AppPageState extends State<AppPage> {
         return wrapPrimaryBarWithSkip(
           FilledButton(
             style: expressiveFilled,
-            onPressed: actionBlocked || skipActive
+            onPressed: installActionBlocked || skipActive
                 ? null
                 : openTrackOnlyReleasePage,
             child: FittedBox(
@@ -3756,7 +3800,7 @@ class _AppPageState extends State<AppPage> {
                 Expanded(
                   child: FilledButton(
                     style: expressiveFilled,
-                    onPressed: actionBlocked || skipActive
+                    onPressed: installActionBlocked || skipActive
                         ? null
                         : runInstallOrMarkUpdated,
                     child: FittedBox(
@@ -3798,7 +3842,7 @@ class _AppPageState extends State<AppPage> {
         return wrapPrimaryBarWithSkip(
           FilledButton(
             style: expressiveFilled,
-            onPressed: actionBlocked || skipActive
+            onPressed: installActionBlocked || skipActive
                 ? null
                 : runInstallOrMarkUpdated,
             child: FittedBox(
@@ -3830,7 +3874,12 @@ class _AppPageState extends State<AppPage> {
         ),
       );
       return wrapPrimaryBarWithSkip(
-        skipActive
+        buildVerificationBlocked
+            ? Tooltip(
+                message: buildVerificationBlockedMessage!,
+                child: singlePrimaryButton,
+              )
+            : skipActive
             ? Tooltip(
                 message: tr('updateDisabledWhileVersionSkipped'),
                 child: singlePrimaryButton,
@@ -4167,7 +4216,8 @@ class _AppPageState extends State<AppPage> {
                             child: _buildPersistentPageError(
                               themedPageContext,
                               pageThemeForPage,
-                              persistentPageError,
+                              effectivePersistentPageError,
+                              title: buildVerificationPersistentPageError,
                             ),
                           ),
                         ],
@@ -4238,7 +4288,9 @@ class _AppPageState extends State<AppPage> {
                                       _buildPersistentPageError(
                                         themedPageContext,
                                         pageThemeForPage,
-                                        persistentPageError,
+                                        effectivePersistentPageError,
+                                        title:
+                                            buildVerificationPersistentPageError,
                                       ),
                                       getInfoColumn(
                                         themedPageContext,

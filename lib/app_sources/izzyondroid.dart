@@ -346,8 +346,6 @@ class IzzyOnDroid extends AppSource {
       appIdOrName,
       additionalSettings,
       name,
-      requireReproducible:
-          additionalSettings['enforceReproducibleBuilds'] == true,
       reproducibleReleaseStatus:
           (String appId, int versionCode, String? apkSha256) {
             return _rbtLogReleaseReproducibleStatus(

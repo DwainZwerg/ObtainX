@@ -2,6 +2,7 @@ import java.io.FileInputStream
 import java.util.Properties
 import com.android.build.api.variant.FilterConfiguration.FilterType.*
 import com.android.build.gradle.internal.api.ApkVariantOutputImpl
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
     id("com.android.application")
@@ -37,10 +38,6 @@ android {
         isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_21
         targetCompatibility = JavaVersion.VERSION_21
-    }
-
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_21.toString()
     }
 
     defaultConfig {
@@ -86,7 +83,7 @@ android {
         getByName("release") {
             isMinifyEnabled = true
             isShrinkResources = true
-            val releaseSigningConfig = signingConfigs.getByName("release")
+            val releaseSigningConfig = signingConfigs.maybeCreate("release")
             signingConfig = if (keystorePropertiesExists && releaseSigningConfig.storeFile != null) {
                 releaseSigningConfig
             } else {
@@ -122,6 +119,12 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget.set(JvmTarget.JVM_21)
+    }
+}
+
 // Per-ABI versionCode = base * 10 + abi-suffix. Both the GitHub split builds and
 // the F-Droid split builds use this same scheme, so each ABI's APK carries one
 // versionCode across both channels (base 3800 -> x86_64 38001, armeabi-v7a 38002,
@@ -138,6 +141,43 @@ android.applicationVariants.configureEach {
         val abiVersionCode = abiCodes[output.filters.find { it.filterType == "ABI" }?.identifier]
         if (abiVersionCode != null) {
             (output as ApkVariantOutputImpl).versionCodeOverride = variant.versionCode * 10 + abiVersionCode
+        }
+    }
+}
+
+// Reproducible builds: the Android NDK linker stamps a non-deterministic 20-byte
+// GNU build-id into native libraries (notably package:jni's libdartjni.so). That
+// build-id is the ONLY thing that differs between this app's CI build and F-Droid's
+// rebuild — the compiled code is byte-identical — and it breaks F-Droid's
+// reproducible-build check. Remove the .note.gnu.build-id section from every
+// packaged .so so that every build (CI and F-Droid, both Linux x86_64 hosts)
+// produces identical native libraries. No-ops on non-Linux/local builds (the
+// llvm-objcopy path simply won't exist there), so it never breaks a dev build.
+tasks.configureEach {
+    if (name.startsWith("strip") && name.endsWith("DebugSymbols")) {
+        doLast {
+            val objcopy = file("${android.ndkDirectory}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy")
+            if (objcopy.exists()) {
+                listOf("stripped_native_libs", "merged_native_libs").forEach { dirName ->
+                    val dir = layout.buildDirectory.dir("intermediates/$dirName").get().asFile
+                    if (dir.exists()) {
+                        dir.walkTopDown().filter { it.isFile && it.extension == "so" }.forEach { so ->
+                            try {
+                                ProcessBuilder(
+                                    objcopy.absolutePath,
+                                    "--remove-section=.note.gnu.build-id",
+                                    so.absolutePath,
+                                )
+                                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                                    .redirectError(ProcessBuilder.Redirect.DISCARD)
+                                    .start()
+                                    .waitFor()
+                            } catch (_: Exception) {
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

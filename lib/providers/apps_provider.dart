@@ -96,6 +96,71 @@ String formatBytesForDisplay(int bytes) {
   }
 }
 
+bool reproducibleBuildVerificationApplies(AppSource source) {
+  return source is FDroid || source is FDroidRepo || source is IzzyOnDroid;
+}
+
+bool reproducibleBuildEnforcementApplies(App app, AppSource source) {
+  return app.additionalSettings['enforceReproducibleBuilds'] == true &&
+      reproducibleBuildVerificationApplies(source);
+}
+
+String reproducibleBuildStatusForEnforcement(App app) {
+  return app.latestReproducibleStatus ??
+      reproducibleBuildStatusFromBool(app.latestIsReproducible);
+}
+
+bool reproducibleBuildEnforcementBlocksInstall(App app, AppSource source) {
+  return reproducibleBuildEnforcementApplies(app, source) &&
+      reproducibleBuildStatusForEnforcement(app) !=
+          reproducibleBuildStatusVerified;
+}
+
+String reproducibleBuildEnforcedBlockedMessage() {
+  return tr('reproducibleBuildEnforcedButBlocked');
+}
+
+bool githubAttestationEnforcementBlocksInstall(
+  App app,
+  AppSource source,
+  SettingsProvider settingsProvider,
+) {
+  return source is GitHub &&
+      source.shouldEnforceAttestations(
+        app.additionalSettings,
+        settingsProvider,
+      ) &&
+      app.latestAttestationStatus != githubAttestationStatusVerified;
+}
+
+String githubAttestationEnforcedBlockedMessage(String? attestationStatus) {
+  return tr(
+    attestationStatus == githubAttestationStatusUnsupported
+        ? 'githubAttestationEnforcedButUnsupported'
+        : 'githubAttestationEnforcedButFailed',
+  );
+}
+
+bool buildVerificationEnforcementBlocksInstall(
+  App app,
+  AppSource source,
+  SettingsProvider settingsProvider,
+) {
+  return reproducibleBuildEnforcementBlocksInstall(app, source) ||
+      githubAttestationEnforcementBlocksInstall(app, source, settingsProvider);
+}
+
+String buildVerificationEnforcedBlockedMessage(
+  App app,
+  AppSource source,
+  SettingsProvider settingsProvider,
+) {
+  if (reproducibleBuildEnforcementBlocksInstall(app, source)) {
+    return reproducibleBuildEnforcedBlockedMessage();
+  }
+  return githubAttestationEnforcedBlockedMessage(app.latestAttestationStatus);
+}
+
 /// True if both versions are equal or one is a prefix of the other with a
 /// non-digit next (e.g. 50.5.19 and 50.5.19-31 [0] [PR] 879778031), or both
 /// contain the same commit-hash-like token (6+ hex chars), e.g. 1.5.3-DEV (75094D8) vs debug-75094d8.
@@ -2104,33 +2169,16 @@ class AppsProvider with ChangeNotifier {
           app.url,
           overrideSource: app.overrideSource,
         );
-        if (app.additionalSettings['enforceReproducibleBuilds'] == true) {
-          if (source is FDroid ||
-              source is FDroidRepo ||
-              source is IzzyOnDroid) {
-            final String reproducibleStatus =
-                app.latestReproducibleStatus ??
-                reproducibleBuildStatusFromBool(app.latestIsReproducible);
-            if (reproducibleStatus != reproducibleBuildStatusVerified) {
-              try {
-                if (dir.file.existsSync()) {
-                  dir.file.deleteSync();
-                }
-                if (dir.extracted.existsSync()) {
-                  dir.extracted.deleteSync(recursive: true);
-                }
-              } catch (_) {}
-              throw ObtainiumError(
-                tr(
-                  reproducibleStatus == reproducibleBuildStatusNotReproducible
-                      ? 'reproducibleBuildEnforcedButFailed'
-                      : reproducibleStatus == reproducibleBuildStatusNoData
-                      ? 'reproducibleBuildEnforcedButNoData'
-                      : 'reproducibleBuildEnforcedButUnknown',
-                ),
-              );
+        if (reproducibleBuildEnforcementBlocksInstall(app, source)) {
+          try {
+            if (dir.file.existsSync()) {
+              dir.file.deleteSync();
             }
-          }
+            if (dir.extracted.existsSync()) {
+              dir.extracted.deleteSync(recursive: true);
+            }
+          } catch (_) {}
+          throw ObtainiumError(reproducibleBuildEnforcedBlockedMessage());
         }
         final bool githubAttestationEngineRunning =
             source is GitHub &&
@@ -2333,35 +2381,18 @@ class AppsProvider with ChangeNotifier {
           app.url,
           overrideSource: app.overrideSource,
         );
-        if (app.additionalSettings['enforceReproducibleBuilds'] == true) {
-          if (source is FDroid ||
-              source is FDroidRepo ||
-              source is IzzyOnDroid) {
-            final String reproducibleStatus =
-                app.latestReproducibleStatus ??
-                reproducibleBuildStatusFromBool(app.latestIsReproducible);
-            if (reproducibleStatus != reproducibleBuildStatusVerified) {
-              try {
-                if (file.file.existsSync()) {
-                  file.file.deleteSync();
-                }
-                for (var a in additionalAPKs) {
-                  if (a.file.existsSync()) {
-                    a.file.deleteSync();
-                  }
-                }
-              } catch (_) {}
-              throw ObtainiumError(
-                tr(
-                  reproducibleStatus == reproducibleBuildStatusNotReproducible
-                      ? 'reproducibleBuildEnforcedButFailed'
-                      : reproducibleStatus == reproducibleBuildStatusNoData
-                      ? 'reproducibleBuildEnforcedButNoData'
-                      : 'reproducibleBuildEnforcedButUnknown',
-                ),
-              );
+        if (reproducibleBuildEnforcementBlocksInstall(app, source)) {
+          try {
+            if (file.file.existsSync()) {
+              file.file.deleteSync();
             }
-          }
+            for (var additionalApk in additionalAPKs) {
+              if (additionalApk.file.existsSync()) {
+                additionalApk.file.deleteSync();
+              }
+            }
+          } catch (_) {}
+          throw ObtainiumError(reproducibleBuildEnforcedBlockedMessage());
         }
         final bool githubAttestationEngineRunning =
             source is GitHub &&
@@ -2726,14 +2757,33 @@ class AppsProvider with ChangeNotifier {
       if (apps[id] == null) {
         throw ObtainiumError(tr('appNotFound'));
       }
+      final App appToInstall = apps[id]!.app;
       MapEntry<String, String>? apkUrl;
-      var trackOnly = apps[id]!.app.additionalSettings['trackOnly'] == true;
+      var trackOnly = appToInstall.additionalSettings['trackOnly'] == true;
       var refreshBeforeDownload =
-          apps[id]!.app.additionalSettings['refreshBeforeDownload'] == true ||
-          apps[id]!.app.apkUrls.isNotEmpty &&
-              apps[id]!.app.apkUrls.first.value == 'placeholder';
+          appToInstall.additionalSettings['refreshBeforeDownload'] == true ||
+          appToInstall.apkUrls.isNotEmpty &&
+              appToInstall.apkUrls.first.value == 'placeholder';
       if (refreshBeforeDownload) {
-        await checkUpdate(apps[id]!.app.id);
+        await checkUpdate(appToInstall.id);
+      }
+      final App refreshedApp = apps[id]!.app;
+      final AppSource source = SourceProvider().getSource(
+        refreshedApp.url,
+        overrideSource: refreshedApp.overrideSource,
+      );
+      if (buildVerificationEnforcementBlocksInstall(
+        refreshedApp,
+        source,
+        settingsProvider,
+      )) {
+        throw ObtainiumError(
+          buildVerificationEnforcedBlockedMessage(
+            refreshedApp,
+            source,
+            settingsProvider,
+          ),
+        );
       }
       if (!trackOnly) {
         if (context != null && !context.mounted) return [];

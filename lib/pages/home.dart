@@ -17,7 +17,6 @@ import 'package:obtainium/services/shared_url_receiver.dart';
 import 'package:obtainium/theme/app_theme_accent.dart';
 import 'package:obtainium/widgets/progressive_top_edge_overlay.dart';
 import 'package:provider/provider.dart';
-import 'package:url_launcher/url_launcher_string.dart';
 
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -67,98 +66,6 @@ class _HomePageState extends State<HomePage> {
   void initState() {
     super.initState();
     initDeepLinks();
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      var sp = context.read<SettingsProvider>();
-      if (!sp.welcomeShown) {
-        if (!context.mounted) return;
-        await showDialog(
-          context: context,
-          builder: (BuildContext ctx) {
-            return AlertDialog(
-              title: Text(tr('welcome')),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                spacing: 20,
-                children: [
-                  Text(tr('documentationLinksNote')),
-                  InkWell(
-                    onTap: () {
-                      launchUrlString(
-                        'https://github.com/bikram-agarwal/ObtainX/blob/main/README.md',
-                        mode: LaunchMode.externalApplication,
-                      );
-                    },
-                    child: const Text(
-                      'https://github.com/bikram-agarwal/ObtainX/blob/main/README.md',
-                      style: TextStyle(
-                        decoration: TextDecoration.underline,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  autofocus: sp.isTV,
-                  onPressed: () {
-                    sp.welcomeShown = true;
-                    Navigator.of(context).pop(null);
-                  },
-                  child: Text(tr('ok')),
-                ),
-              ],
-            );
-          },
-        );
-      }
-      if (!sp.googleVerificationWarningShown && DateTime.now().year == 2026) {
-        if (!context.mounted) return;
-        await showDialog(
-          // ignore: use_build_context_synchronously
-          context: context,
-          builder: (BuildContext ctx) {
-            return AlertDialog(
-              title: Text(tr('note')),
-              scrollable: true,
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                spacing: 20,
-                children: [
-                  Text(tr('googleVerificationWarningP1')),
-                  InkWell(
-                    onTap: () {
-                      launchUrlString(
-                        'https://keepandroidopen.org/',
-                        mode: LaunchMode.externalApplication,
-                      );
-                    },
-                    child: Text(
-                      tr('googleVerificationWarningP2'),
-                      style: const TextStyle(
-                        decoration: TextDecoration.underline,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                  Text(tr('googleVerificationWarningP3')),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  autofocus: sp.isTV,
-                  onPressed: () {
-                    sp.googleVerificationWarningShown = true;
-                    Navigator.of(context).pop(null);
-                  },
-                  child: Text(tr('ok')),
-                ),
-              ],
-            );
-          },
-        );
-      }
-    });
   }
 
   Future<void> initDeepLinks() async {

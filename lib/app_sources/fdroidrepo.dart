@@ -133,7 +133,6 @@ class FDroidRepo extends AppSource {
     String appIdOrName,
     Map<String, dynamic> additionalSettings,
     String authorFallback, {
-    bool requireReproducible = false,
     Future<bool?> Function(String appId, int versionCode, String? apkSha256)?
     isReproducibleRelease,
     Future<String?> Function(String appId, int versionCode, String? apkSha256)?
@@ -201,26 +200,10 @@ class FDroidRepo extends AppSource {
         }
         return reproducibleBuildStatusNoData;
       } catch (_) {
-        if (requireReproducible) {
-          rethrow;
-        }
         return reproducibleBuildStatusError;
       }
     }
 
-    if (requireReproducible) {
-      final reproducibleReleases = <dynamic>[];
-      for (final release in releases) {
-        if (await releaseReproducibleStatus(release) ==
-            reproducibleBuildStatusVerified) {
-          reproducibleReleases.add(release);
-        }
-      }
-      releases = reproducibleReleases;
-      if (releases.isEmpty) {
-        throw NoReleasesError();
-      }
-    }
     String? changeLog = foundApps[0].querySelector('changelog')?.innerHtml;
     String? latestVersion = releases[0].querySelector('version')?.innerHtml;
     if (latestVersion == null) {

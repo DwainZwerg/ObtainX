@@ -376,7 +376,7 @@ void main() {
   );
 
   test(
-    'F-Droid repo parser filters to reproducible releases when enforced',
+    'F-Droid repo parser keeps latest release when enforcement is on',
     () async {
       final details = await FDroidRepo.apkDetailsFromIndexXmlResponse(
         _fdroidRepoResponse('''
@@ -398,9 +398,8 @@ void main() {
 </application></fdroid>
 '''),
         'org.example.app',
-        <String, dynamic>{},
+        <String, dynamic>{'enforceReproducibleBuilds': true},
         'IzzyOnDroid',
-        requireReproducible: true,
         isReproducibleRelease:
             (String appId, int versionCode, String? apkSha256) async {
               return appId == 'org.example.app' &&
@@ -409,13 +408,16 @@ void main() {
             },
       );
 
-      expect(details.version, '2.0');
+      expect(details.version, '3.0');
       expect(details.names.name, 'Example App');
-      expect(details.isReproducible, isTrue);
-      expect(details.reproducibleStatus, reproducibleBuildStatusVerified);
+      expect(details.isReproducible, isFalse);
+      expect(
+        details.reproducibleStatus,
+        reproducibleBuildStatusNotReproducible,
+      );
       expect(
         details.apkUrls.single.value,
-        'https://apt.izzysoft.de/fdroid/repo/org.example.app_2.apk',
+        'https://apt.izzysoft.de/fdroid/repo/org.example.app_3.apk',
       );
     },
   );
