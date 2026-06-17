@@ -623,27 +623,6 @@ class SettingsProvider with ChangeNotifier {
     return result;
   }
 
-  bool get welcomeShown {
-    return prefs?.getBool('welcomeShown') ?? false;
-  }
-
-  set welcomeShown(bool welcomeShown) {
-    prefs?.setBool('welcomeShown', welcomeShown);
-    notifyListeners();
-  }
-
-  bool get googleVerificationWarningShown {
-    return prefs?.getBool('googleVerificationWarningShown') ?? false;
-  }
-
-  set googleVerificationWarningShown(bool googleVerificationWarningShown) {
-    prefs?.setBool(
-      'googleVerificationWarningShown',
-      googleVerificationWarningShown,
-    );
-    notifyListeners();
-  }
-
   bool checkJustStarted() {
     if (justStarted) {
       justStarted = false;

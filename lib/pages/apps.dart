@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:animations/animations.dart';
 import 'package:easy_localization/easy_localization.dart' hide TextDirection;
+import 'package:expressive_loading_indicator/expressive_loading_indicator.dart';
 import 'package:expressive_refresh/expressive_refresh.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -400,8 +401,28 @@ class _AppListItem extends StatelessWidget {
     final hasUpdate = installed != null && appHasActionableUpdate(app.app);
     final hasUncertainUpdate =
         installed != null && versionOrderUncertainUpdate(app.app);
+    final settingsProvider = context.read<SettingsProvider>();
+    final source = SourceProvider().getSource(
+      app.app.url,
+      overrideSource: app.app.overrideSource,
+    );
+    final buildVerificationBlocked = buildVerificationEnforcementBlocksInstall(
+      app.app,
+      source,
+      settingsProvider,
+    );
+    final String buildVerificationBlockedMessage =
+        buildVerificationEnforcedBlockedMessage(
+          app.app,
+          source,
+          settingsProvider,
+        );
 
     void onUpdateOrOpenReleasePressed() {
+      if (buildVerificationBlocked) {
+        showError(ObtainiumError(buildVerificationBlockedMessage), context);
+        return;
+      }
       final trackOnly = app.app.additionalSettings['trackOnly'] == true;
       if (trackOnly) {
         launchUrlString(
@@ -427,8 +448,14 @@ class _AppListItem extends StatelessWidget {
       return IconButton(
         visualDensity: VisualDensity.compact,
         color: colorScheme.primary,
-        tooltip: trackOnly ? tr('openDownloadPage') : tr('update'),
-        onPressed: areDownloadsRunning ? null : onUpdateOrOpenReleasePressed,
+        tooltip: buildVerificationBlocked
+            ? buildVerificationBlockedMessage
+            : trackOnly
+            ? tr('openDownloadPage')
+            : tr('update'),
+        onPressed: areDownloadsRunning || buildVerificationBlocked
+            ? null
+            : onUpdateOrOpenReleasePressed,
         icon: const Icon(Icons.install_mobile),
       );
     }
@@ -437,8 +464,12 @@ class _AppListItem extends StatelessWidget {
       return IconButton(
         visualDensity: VisualDensity.compact,
         color: colorScheme.primary,
-        tooltip: tr('uncertainUpdateTooltip'),
-        onPressed: areDownloadsRunning ? null : onUpdateOrOpenReleasePressed,
+        tooltip: buildVerificationBlocked
+            ? buildVerificationBlockedMessage
+            : tr('uncertainUpdateTooltip'),
+        onPressed: areDownloadsRunning || buildVerificationBlocked
+            ? null
+            : onUpdateOrOpenReleasePressed,
         icon: const Icon(Icons.help_outline),
       );
     }
@@ -1077,15 +1108,93 @@ class AppsPage extends StatefulWidget {
   State<AppsPage> createState() => AppsPageState();
 }
 
+String? _githubReleaseApiUrlFromUrl(String url) {
+  final uri = Uri.tryParse(url);
+  if (uri == null || !uri.host.toLowerCase().endsWith('github.com')) {
+    return null;
+  }
+  final segments = uri.pathSegments;
+  if (segments.length < 3 || segments[2] != 'releases') {
+    return null;
+  }
+  final repoApiBase =
+      'https://api.github.com/repos/${segments[0]}/${segments[1]}/releases';
+  if (segments.length == 3 || segments[3] == 'latest') {
+    return '$repoApiBase/latest';
+  }
+  if (segments[3] == 'tag' && segments.length >= 5) {
+    final tagName = segments.sublist(4).join('/');
+    return '$repoApiBase/tags/${Uri.encodeComponent(tagName)}';
+  }
+  return null;
+}
+
+String? _rawFileUrlFromRepositoryPageUrl(String url) {
+  final uri = Uri.tryParse(url);
+  if (uri == null) return null;
+  final host = uri.host.toLowerCase();
+  final segments = uri.pathSegments;
+  if (host.endsWith('github.com') &&
+      segments.length >= 5 &&
+      segments[2] == 'blob') {
+    return Uri(
+      scheme: 'https',
+      host: 'raw.githubusercontent.com',
+      pathSegments: [
+        segments[0],
+        segments[1],
+        segments[3],
+        ...segments.sublist(4),
+      ],
+    ).toString();
+  }
+  final gitLabBlobIndex = segments.indexOf('blob');
+  if (host.endsWith('gitlab.com') &&
+      gitLabBlobIndex > 1 &&
+      segments[gitLabBlobIndex - 1] == '-' &&
+      segments.length > gitLabBlobIndex + 2) {
+    final rawSegments = List<String>.from(segments);
+    rawSegments[gitLabBlobIndex] = 'raw';
+    return uri.replace(pathSegments: rawSegments).toString();
+  }
+  return null;
+}
+
+Future<String> _loadLinkedChangeLog(
+  AppSource appSource,
+  App app,
+  String changesUrl,
+) async {
+  final githubReleaseApiUrl = _githubReleaseApiUrlFromUrl(changesUrl);
+  final requestUrl =
+      githubReleaseApiUrl ??
+      _rawFileUrlFromRepositoryPageUrl(changesUrl) ??
+      changesUrl;
+  final response = await appSource.sourceRequest(
+    requestUrl,
+    app.additionalSettings,
+  );
+  if (response.statusCode != 200) {
+    throw getObtainiumHttpError(response);
+  }
+  if (githubReleaseApiUrl != null) {
+    final decoded = jsonDecode(response.body);
+    if (decoded is Map<String, dynamic>) {
+      return (decoded['body'] ?? '').toString();
+    }
+  }
+  return response.body;
+}
+
 void showChangeLogDialog(
   BuildContext context,
   App app,
   String? changesUrl,
   AppSource appSource,
-  String changeLog,
+  String? changeLog,
 ) {
-  String processedChangeLog = changeLog;
-  if (appSource.changeLogIfAnyIsMarkDown) {
+  String? processedChangeLog = changeLog;
+  if (changeLog != null && appSource.changeLogIfAnyIsMarkDown) {
     final htmlImgRegex = RegExp(r'<img\s+([^>]+)\/?>', caseSensitive: false);
     final srcRegex = RegExp("src=[\"']([^\"']+)[\"']", caseSensitive: false);
     final altRegex = RegExp("alt=[\"']([^\"']+)[\"']", caseSensitive: false);
@@ -1118,7 +1227,7 @@ void showChangeLogDialog(
       }
     }
 
-    processedChangeLog = processedChangeLog.replaceAllMapped(htmlImgRegex, (match) {
+    processedChangeLog = processedChangeLog!.replaceAllMapped(htmlImgRegex, (match) {
       final attrs = match.group(1) ?? '';
       final srcMatch = srcRegex.firstMatch(attrs);
       final altMatch = altRegex.firstMatch(attrs);
@@ -1138,75 +1247,188 @@ void showChangeLogDialog(
       return '![$alt]($absoluteSrc)';
     });
   }
+  final Future<String>? linkedChangeLogFuture =
+      changeLog == null && changesUrl != null
+      ? _loadLinkedChangeLog(appSource, app, changesUrl)
+      : null;
 
-  showDialog(
+  showModalBottomSheet<void>(
     context: context,
-    builder: (BuildContext context) {
-      return GeneratedFormModal(
-        title: tr('changes'),
-        items: const [],
-        message: app.latestVersion,
-        additionalWidgets: [
-          changesUrl != null
-              ? InkWell(
-                  child: Text(
-                    changesUrl,
-                    style: const TextStyle(
-                      decoration: TextDecoration.underline,
-                      fontStyle: FontStyle.italic,
+    isScrollControlled: true,
+    useSafeArea: true,
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+    ),
+    builder: (BuildContext sheetContext) {
+      final ColorScheme colorScheme = Theme.of(sheetContext).colorScheme;
+      final TextTheme textTheme = Theme.of(sheetContext).textTheme;
+      return DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.92,
+        minChildSize: 0.35,
+        maxChildSize: 0.92,
+        builder: (_, scrollController) {
+          Widget buildChangeLogContent(String? displayChangeLog) {
+            if (displayChangeLog == null) {
+              return const SizedBox.shrink();
+            }
+            return appSource.changeLogIfAnyIsMarkDown
+                ? Markdown(
+                  controller: scrollController,
+                  padding: EdgeInsets.fromLTRB(
+                    20,
+                    8,
+                    20,
+                    24 + MediaQuery.viewPaddingOf(sheetContext).bottom,
+                  ),
+                  styleSheet: MarkdownStyleSheet(
+                    blockquoteDecoration: BoxDecoration(
+                      color: Theme.of(sheetContext).cardColor,
                     ),
                   ),
-                  onTap: () {
-                    launchUrlString(
-                      changesUrl,
-                      mode: LaunchMode.externalApplication,
-                    );
+                  data: displayChangeLog,
+                  onTapLink: (text, href, title) {
+                    if (href != null) {
+                      launchUrlString(
+                        href.startsWith('http://') ||
+                                href.startsWith('https://')
+                            ? href
+                            : '${Uri.parse(app.url).origin}/$href',
+                        mode: LaunchMode.externalApplication,
+                      );
+                    }
                   },
+                  extensionSet: md.ExtensionSet(
+                    md.ExtensionSet.gitHubFlavored.blockSyntaxes,
+                    [
+                      md.EmojiSyntax(),
+                      ...md.ExtensionSet.gitHubFlavored.inlineSyntaxes,
+                    ],
+                  ),
                 )
-              : const SizedBox.shrink(),
-          changesUrl != null
-              ? const SizedBox(height: 16)
-              : const SizedBox.shrink(),
-          appSource.changeLogIfAnyIsMarkDown
-              ? SizedBox(
-                  width: MediaQuery.of(context).size.width,
-                  height: MediaQuery.of(context).size.height - 350,
-                  child: Markdown(
-                    padding: const EdgeInsets.only(
-                      left: 16,
-                      right: 16,
-                      top: 16,
-                      bottom: 48,
-                    ),
-                    styleSheet: MarkdownStyleSheet(
-                      blockquoteDecoration: BoxDecoration(
-                        color: Theme.of(context).cardColor,
+                : SingleChildScrollView(
+                  controller: scrollController,
+                  padding: EdgeInsets.fromLTRB(
+                    20,
+                    8,
+                    20,
+                    24 + MediaQuery.viewPaddingOf(sheetContext).bottom,
+                  ),
+                  child: SelectableText(
+                    displayChangeLog,
+                    style: textTheme.bodyMedium,
+                  ),
+                );
+          }
+
+          final Widget changeLogContent = linkedChangeLogFuture == null
+              ? buildChangeLogContent(processedChangeLog)
+              : FutureBuilder<String>(
+                  future: linkedChangeLogFuture,
+                  builder: (context, snapshot) {
+                    if (snapshot.connectionState != ConnectionState.done) {
+                      return Center(
+                        child: ExpressiveLoadingIndicator(
+                          color: colorScheme.primary,
+                          constraints: const BoxConstraints.tightFor(
+                            width: 64,
+                            height: 64,
+                          ),
+                        ),
+                      );
+                    }
+                    if (snapshot.hasError) {
+                      return SingleChildScrollView(
+                        controller: scrollController,
+                        padding: EdgeInsets.fromLTRB(
+                          20,
+                          16,
+                          20,
+                          24 + MediaQuery.viewPaddingOf(sheetContext).bottom,
+                        ),
+                        child: SelectableText(
+                          snapshot.error.toString(),
+                          style: textTheme.bodyMedium?.copyWith(
+                            color: colorScheme.error,
+                          ),
+                        ),
+                      );
+                    }
+                    return buildChangeLogContent(snapshot.data);
+                  },
+                );
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  margin: const EdgeInsets.symmetric(vertical: 12),
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: colorScheme.outlineVariant,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 0, 8, 8),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            tr('changes'),
+                            style: textTheme.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            app.latestVersion,
+                            style: textTheme.bodySmall?.copyWith(
+                              color: colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                    data: processedChangeLog,
-                    onTapLink: (text, href, title) {
-                      if (href != null) {
-                        launchUrlString(
-                          href.startsWith('http://') ||
-                                  href.startsWith('https://')
-                              ? href
-                              : '${Uri.parse(app.url).origin}/$href',
-                          mode: LaunchMode.externalApplication,
-                        );
-                      }
+                    TextButton(
+                      onPressed: () => Navigator.of(sheetContext).pop(),
+                      child: Text(tr('close')),
+                    ),
+                  ],
+                ),
+              ),
+              if (changesUrl != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 8),
+                  child: InkWell(
+                    onTap: () {
+                      launchUrlString(
+                        changesUrl,
+                        mode: LaunchMode.externalApplication,
+                      );
                     },
-                    extensionSet: md.ExtensionSet(
-                      md.ExtensionSet.gitHubFlavored.blockSyntaxes,
-                      [
-                        md.EmojiSyntax(),
-                        ...md.ExtensionSet.gitHubFlavored.inlineSyntaxes,
-                      ],
+                    child: Text(
+                      changesUrl,
+                      style: textTheme.bodySmall?.copyWith(
+                        color: colorScheme.primary,
+                        decoration: TextDecoration.underline,
+                        fontStyle: FontStyle.italic,
+                      ),
                     ),
                   ),
-                )
-              : Text(changeLog),
-        ],
-        singleNullReturnButton: tr('ok'),
+                ),
+              const Divider(height: 1),
+              Expanded(child: changeLogContent),
+            ],
+          );
+        },
       );
     },
   );
@@ -1223,20 +1445,14 @@ Null Function()? getChangeLogFn(BuildContext context, App app) {
     if (RegExp(
       '(http|ftp|https)://([\\w_-]+(?:(?:\\.[\\w_-]+)+))([\\w.,@?^=%&:/~+#-]*[\\w@?^=%&/~+#-])?',
     ).hasMatch(changeLog!)) {
-      if (changesUrl == null) {
-        changesUrl = changeLog;
-        changeLog = null;
-      }
+      changesUrl ??= changeLog;
+      changeLog = null;
     }
   }
   return (changeLog == null && changesUrl == null)
       ? null
       : () {
-          if (changeLog != null) {
-            showChangeLogDialog(context, app, changesUrl, appSource, changeLog);
-          } else {
-            launchUrlString(changesUrl!, mode: LaunchMode.externalApplication);
-          }
+          showChangeLogDialog(context, app, changesUrl, appSource, changeLog);
         };
 }
 
@@ -2688,6 +2904,29 @@ class AppsPageState extends State<AppsPage> {
         )
         .toList();
 
+    bool buildVerificationBlockedForBatch(String id) {
+      final App? app = appsProvider.apps[id]?.app;
+      if (app == null) {
+        return false;
+      }
+      final AppSource source = SourceProvider().getSource(
+        app.url,
+        overrideSource: app.overrideSource,
+      );
+      return buildVerificationEnforcementBlocksInstall(
+        app,
+        source,
+        settingsProvider,
+      );
+    }
+
+    existingUpdateIdsAllOrSelected = existingUpdateIdsAllOrSelected
+        .where((id) => !buildVerificationBlockedForBatch(id))
+        .toList();
+    newInstallIdsAllOrSelected = newInstallIdsAllOrSelected
+        .where((id) => !buildVerificationBlockedForBatch(id))
+        .toList();
+
     List<String> trackOnlyUpdateIdsAllOrSelected = [];
     existingUpdateIdsAllOrSelected = existingUpdateIdsAllOrSelected.where((id) {
       if (appsProvider.apps[id]!.app.additionalSettings['trackOnly'] == true) {
@@ -2753,7 +2992,7 @@ class AppsPageState extends State<AppsPage> {
 
     if (listBuildToken != _lastGroupIndexCacheToken) {
       _lastGroupIndexCacheToken = listBuildToken;
-      
+
       // 1. Categories
       if (effectiveGroupBy == AppsListGroupBy.category) {
         List<String?> getListedCategories(List<AppInMemory> appsSource) {

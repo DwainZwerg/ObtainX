@@ -732,6 +732,7 @@
     "githubBuildVerificationOff": "Off - Do nothing. Saves API calls.",
     "githubBuildVerificationAudit": "Audit Only - verify and show result, but don't block installation.",
     "githubBuildVerificationEnforce": "Enforce - verify, show result, and block installation of unverified builds.",
+    "reproducibleBuildEnforcedButBlocked": "Latest build is not verified. So build verification enforcement is blocking installation.",
     "reproducibleBuildEnforcedButFailed": "Reproducible build enforcement failed: build is not reproducible",
     "reproducibleBuildEnforcedButNoData": "Reproducible build enforcement failed: no verification data is available",
     "reproducibleBuildEnforcedButUnknown": "Reproducible build enforcement failed: could not check build status",

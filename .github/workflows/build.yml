@@ -81,26 +81,43 @@ jobs:
           APK_DIR=build/app/outputs/flutter-apk
           VERSION=${{ steps.extract_version.outputs.version }}
 
-          # Normal flavor — public GitHub download (in-app self-update enabled).
+          # Normal flavor — gradle-signed, public GitHub download (in-app self-update enabled).
           flutter build apk --split-per-abi --flavor normal
           for f in "$APK_DIR"/app-*-normal-release.apk; do
             arch=$(basename "$f" | sed -E 's/^app-(.+)-normal-release\.apk$/\1/')
             mv "$f" "$APK_DIR/ObtainX-v${VERSION}-${arch}.apk"
           done
 
-          # F-Droid flavor — self-update disabled via lib/main_fdroid.dart
-          # Split per-ABI (~24 MB each) so F-Droid downloads stay small. 
-          # The fdroiddata recipe has one entry per ABI (VercodeOperation
-          # list), so auto-update still works, and each entry's binary: points at the
-          # matching file produced here.
+          # F-Droid flavor — must be reproducible AND apksigcopier-compatible.
+          # build-tools >= 35 apksigner forcibly rewrites alignment padding, which breaks
+          # F-Droid's apksigcopier (the signature can't be transplanted onto F-Droid's
+          # rebuild). Per the apksigcopier README, the fix is: build UNSIGNED, apply the
+          # SAME apksigner-style padding F-Droid applies (reproducible-apk-tools zipalign.py
+          # --pad-like-apksigner, pinned to the version the fdroiddata recipe uses), then
+          # sign with --alignment-preserved so apksigner keeps that exact padding. The
+          # gradle build-id strip already makes the .so byte-identical to F-Droid's build.
+          rm -f android/key.properties          # build the fdroid flavor UNSIGNED
           flutter build apk --split-per-abi --flavor fdroid -t lib/main_fdroid.dart
+          # zipalign.py is a VENDORED, reviewed copy of reproducible-apk-tools' zipalign.py
+          # (pinned to commit 719c3471 — the exact version F-Droid's recipe uses). It is
+          # committed and auditable in this repo and is NOT downloaded at build time.
+          APKSIGNER="$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)"
+          echo "Using apksigner: $APKSIGNER"
           for f in "$APK_DIR"/app-*-fdroid-release.apk; do
             arch=$(basename "$f" | sed -E 's/^app-(.+)-fdroid-release\.apk$/\1/')
+            python3 zipalign.py --page-size 16 --pad-like-apksigner --replace "$f" "$f.aln"
+            mv -f "$f.aln" "$f"
+            "$APKSIGNER" sign --alignment-preserved \
+              --ks android/app/bikram_signer.p12 --ks-pass "pass:$KS_PASS" \
+              --ks-key-alias "$K_ALIAS" --key-pass "pass:$KS_PASS" "$f"
             mv "$f" "$APK_DIR/ObtainX-v${VERSION}-fdroid-${arch}.apk"
           done
 
-          rm -f "$APK_DIR"/*.sha1
+          rm -f "$APK_DIR"/*.sha1 "$APK_DIR"/*.idsig
           ls -l "$APK_DIR"
+        env:
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          K_ALIAS: ${{ secrets.KEY_ALIAS }}
 
       - name: Upload APKs
         uses: actions/upload-artifact@v4
