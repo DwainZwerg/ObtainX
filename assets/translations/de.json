@@ -549,6 +549,7 @@
     "githubBuildVerificationOff": "Aus – Keine Aktion. Spart API-Aufrufe.",
     "githubBuildVerificationAudit": "Nur prüfen – Ergebnisse anzeigen, aber die Installation nicht blockieren.",
     "githubBuildVerificationEnforce": "Erzwingen – Die Installation nicht überprüfter Builds blockieren.",
+    "reproducibleBuildEnforcedButBlocked": "Die neueste Version wurde nicht verifiziert. Daher wird die Installation blockiert.",
     "reproducibleBuildEnforcedButFailed": "Die Überprüfung der Reproduzierbarkeit des Builds ist fehlgeschlagen: Der Build ist nicht reproduzierbar",
     "reproducibleBuildEnforcedButNoData": "Das Erzwingen eines reproduzierbaren Builds ist fehlgeschlagen: Es sind keine Verifizierungsdaten verfügbar",
     "reproducibleBuildEnforcedButUnknown": "Das Erzwingen eines reproduzierbaren Builds ist fehlgeschlagen: Der Build-Status konnte nicht überprüft werden",
@@ -556,5 +557,8 @@
     "githubAttestationEnforcedButUnsupported": "Die Überprüfung der GitHub-Builds ist fehlgeschlagen: Für diese Version liegt kein attestation proof vor",
     "githubAttestationEnforcedButUnknown": "Die GitHub-Build-Überprüfung konnte diesen Build nicht überprüfen",
     "reproducibleBuild": "Verifizierte Version",
+    "notReproducibleBuild": "Unverifizierter Build",
+    "verificationNoData": "Keine Verifizierungsdaten",
+    "verificationCantCheck": "konnte nicht prüfen",
     "security": "Sicherheit"
 }
