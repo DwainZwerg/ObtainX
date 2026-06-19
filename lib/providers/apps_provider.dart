@@ -68,14 +68,7 @@ List<String> packageNamesToTryForInstalledInfo(
 }) {
   final List<String> packageNamesToTry = <String>[packageName];
   if (kDebugMode && includeOwnDebugBuild && packageName == obtainiumId) {
-    packageNamesToTry.insert(
-      0,
-      fdroid ? '$obtainiumId.fdroid.debug' : '$obtainiumId.debug',
-    );
-  } else if (kDebugMode &&
-      includeOwnDebugBuild &&
-      packageName == '$obtainiumId.fdroid') {
-    packageNamesToTry.insert(0, '$obtainiumId.fdroid.debug');
+    packageNamesToTry.insert(0, '$obtainiumId.debug');
   }
   return packageNamesToTry;
 }
@@ -813,6 +806,10 @@ List<String> moveStrToEnd(List<String> arr, String str, {String? strB}) {
     arr = [...arr, temp!];
   }
   return arr;
+}
+
+bool isObtainiumAppId(String appId) {
+  return appId == obtainiumId || appId == obtainiumTempId;
 }
 
 List<MapEntry<String, int>> moveStrToEndMapEntryWithCount(
@@ -1791,6 +1788,39 @@ class AppsProvider with ChangeNotifier {
         app.url,
         additionalSettingsPlusSourceConfig,
       );
+      if (context != null &&
+          context.mounted &&
+          downloadUrl.toLowerCase().startsWith('http://')) {
+        bool proceed = false;
+        await showDialog(
+          context: context,
+          barrierDismissible: false,
+          builder: (BuildContext dialogContext) {
+            return AlertDialog(
+              title: Text(tr('insecureDownloadUrl')),
+              content: Text(tr('cleartextDownloadWarningExplanation')),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    Navigator.of(dialogContext).pop();
+                  },
+                  child: Text(tr('cancel')),
+                ),
+                TextButton(
+                  onPressed: () {
+                    proceed = true;
+                    Navigator.of(dialogContext).pop();
+                  },
+                  child: Text(tr('continue')),
+                ),
+              ],
+            );
+          },
+        );
+        if (!proceed) {
+          throw ObtainiumError(tr('cancelled'));
+        }
+      }
       var notif = DownloadNotification(app.finalName, 100);
       notificationsProvider?.cancel(notif.id);
       int? prevProg;
@@ -2835,7 +2865,6 @@ class AppsProvider with ChangeNotifier {
       obtainiumId,
       strB: obtainiumTempId,
     );
-    appsToInstall = moveStrToEnd(appsToInstall, '$obtainiumId.fdroid');
 
     Future<void> installFn(
       String id,
@@ -3024,28 +3053,47 @@ class AppsProvider with ChangeNotifier {
 
     if (forceParallelDownloads || settingsProvider.parallelDownloads) {
       Future<void> installChain = Future.value();
-      await Future.wait(
-        appsToInstall.map((appIdToProcess) async {
-          final downloadResult = await downloadFn(appIdToProcess);
-          final completer = Completer<void>();
-          installChain = installChain
-              .then((_) async {
-                try {
-                  await installDownloadResult(downloadResult);
-                } finally {
-                  if (!completer.isCompleted) {
-                    completer.complete();
-                  }
-                }
-              })
-              .catchError((exception) {
+      final downloadResultsByAppId = <String, Future<Map<Object?, Object?>>>{
+        for (final appIdToProcess in appsToInstall)
+          appIdToProcess: downloadFn(appIdToProcess),
+      };
+      final selfUpdateAppIds = appsToInstall
+          .where((appIdToProcess) => isObtainiumAppId(appIdToProcess))
+          .toList();
+
+      // Downloads stay parallel, but installing this app before the rest can
+      // stop the process and leave the remaining queue unfinished.
+      Future<void> installWhenDownloaded(String appIdToProcess) async {
+        final downloadResult = await downloadResultsByAppId[appIdToProcess]!;
+        final completer = Completer<void>();
+        installChain = installChain
+            .then((_) async {
+              try {
+                await installDownloadResult(downloadResult);
+              } finally {
                 if (!completer.isCompleted) {
                   completer.complete();
                 }
-              });
-          await completer.future;
-        }),
+              }
+            })
+            .catchError((exception) {
+              if (!completer.isCompleted) {
+                completer.complete();
+              }
+            });
+        await completer.future;
+      }
+
+      await Future.wait(
+        appsToInstall
+            .where((appIdToProcess) => !isObtainiumAppId(appIdToProcess))
+            .map(installWhenDownloaded),
       );
+      for (final appIdToProcess in selfUpdateAppIds) {
+        await installDownloadResult(
+          await downloadResultsByAppId[appIdToProcess]!,
+        );
+      }
     } else {
       for (final appIdToProcess in appsToInstall) {
         await installDownloadResult(await downloadFn(appIdToProcess));
@@ -4527,7 +4575,28 @@ class AppsProvider with ChangeNotifier {
             return appIds.contains(e.app.id);
           }
         })
-        .map((e) => e.app.toJson())
+        .map((e) {
+          final appJson = e.app.toJson();
+          final Map<String, dynamic> additionalSettings = Map<String, dynamic>.from(
+            jsonDecode(appJson['additionalSettings'] as String),
+          );
+          final List<dynamic>? folderIds = additionalSettings['folderIds'] as List?;
+          if (folderIds != null && folderIds.isNotEmpty) {
+            final Map<String, String> folderNames = {};
+            final existingFolders = exportSettingsProvider.appFolders;
+            for (final folderId in folderIds) {
+              for (final f in existingFolders) {
+                if (f.id == folderId) {
+                  folderNames[folderId] = f.name;
+                  break;
+                }
+              }
+            }
+            additionalSettings['folderNames'] = folderNames;
+            appJson['additionalSettings'] = jsonEncode(additionalSettings);
+          }
+          return appJson;
+        })
         .toList();
     int shouldExportSettings = exportSettingsProvider.exportSettings;
     if (overrideExportSettings != null) {
@@ -4672,6 +4741,110 @@ class AppsProvider with ChangeNotifier {
         ((newFormat ? decodedJSON['apps'] : decodedJSON) as List<dynamic>)
             .map((e) => App.fromJson(e))
             .toList();
+
+    final List<AppFolder> existingFolders = List<AppFolder>.from(settingsProvider.appFolders);
+    final Map<String, String> backupIdToTargetId = {};
+    final List<AppFolder> foldersToCreate = [];
+
+    // Parse backup folders from settings if they exist
+    final Map<String, String> backupFolderIdToName = {};
+    if (newFormat && decodedJSON['settings'] != null && decodedJSON['settings']['appFolders'] != null) {
+      try {
+        final list = jsonDecode(decodedJSON['settings']['appFolders'] as String) as List<dynamic>;
+        for (var e in list) {
+          final folder = AppFolder.fromJson(e as Map<String, dynamic>);
+          backupFolderIdToName[folder.id] = folder.name;
+        }
+      } catch (_) {}
+    }
+
+    // Gather folder names from imported apps' folderNames map
+    for (final app in importedApps) {
+      final Map<dynamic, dynamic>? appFolderNames = app.additionalSettings['folderNames'] as Map?;
+      if (appFolderNames != null) {
+        appFolderNames.forEach((key, val) {
+          if (key is String && val is String) {
+            backupFolderIdToName.putIfAbsent(key, () => val);
+          }
+        });
+      }
+    }
+
+    // Match or create folders
+    backupFolderIdToName.forEach((backupId, name) {
+      AppFolder? match;
+      for (final f in existingFolders) {
+        if (f.name.trim().toLowerCase() == name.trim().toLowerCase()) {
+          match = f;
+          break;
+        }
+      }
+
+      if (match != null) {
+        backupIdToTargetId[backupId] = match.id;
+      } else {
+        final newFolder = AppFolder(id: backupId, name: name);
+        foldersToCreate.add(newFolder);
+        backupIdToTargetId[backupId] = backupId;
+      }
+    });
+
+    if (foldersToCreate.isNotEmpty) {
+      existingFolders.addAll(foldersToCreate);
+      settingsProvider.appFolders = existingFolders;
+    }
+
+    // Rewrite app folderIds and folderNames maps
+    for (final app in importedApps) {
+      final folderIds = folderIdsForApp(app);
+      final Map<String, dynamic> updatedFolderNames = {};
+      
+      if (folderIds.isNotEmpty) {
+        final List<String> updatedFolderIds = [];
+        for (final id in folderIds) {
+          final String? targetId = backupIdToTargetId[id];
+          if (targetId != null) {
+            updatedFolderIds.add(targetId);
+            final String? folderName = backupFolderIdToName[id];
+            if (folderName != null) {
+              updatedFolderNames[targetId] = folderName;
+            }
+          } else {
+            AppFolder? match;
+            for (final f in existingFolders) {
+              if (f.id == id) {
+                match = f;
+                break;
+              }
+            }
+            if (match != null) {
+              updatedFolderIds.add(id);
+              updatedFolderNames[id] = match.name;
+            }
+          }
+        }
+        app.additionalSettings['folderIds'] = updatedFolderIds;
+      }
+      
+      final excludedFolderIds = excludedFolderIdsForApp(app);
+      if (excludedFolderIds.isNotEmpty) {
+        final List<String> updatedExcludedIds = [];
+        for (final id in excludedFolderIds) {
+          final String? targetId = backupIdToTargetId[id];
+          if (targetId != null) {
+            updatedExcludedIds.add(targetId);
+          } else {
+            if (existingFolders.any((f) => f.id == id)) {
+              updatedExcludedIds.add(id);
+            }
+          }
+        }
+        app.additionalSettings['excludedFolderIds'] = updatedExcludedIds;
+      }
+
+      app.additionalSettings['folderNames'] = updatedFolderNames;
+    }
+
     await _loadingCompleter?.future;
     await Future.wait(
       importedApps.map((a) async {
@@ -4684,9 +4857,11 @@ class AppsProvider with ChangeNotifier {
     );
     await saveApps(importedApps, onlyIfExists: false);
     notifyListeners();
+
     if (newFormat && decodedJSON['settings'] != null) {
       var settingsMap = decodedJSON['settings'] as Map<String, Object?>;
       settingsMap.forEach((key, value) {
+        if (key == 'appFolders') return; // Skip folder settings as we already merged/saved them
         if (value is int) {
           settingsProvider.prefs?.setInt(key, value);
         } else if (value is double) {
@@ -4702,6 +4877,7 @@ class AppsProvider with ChangeNotifier {
           settingsProvider.prefs?.setString(key, value as String);
         }
       });
+      await settingsProvider.initializeSettings();
     }
     return MapEntry<List<App>, bool>(
       importedApps,
@@ -4745,7 +4921,7 @@ class AppsProvider with ChangeNotifier {
       if (folder.rule == null) continue;
       if (excludedFolderIdsForApp(app).contains(folder.id)) continue;
       if (folder.rule!.matches(app, resolvedSource: resolvedSource)) {
-        addAppToFolder(app, folder.id);
+        addAppToFolder(app, folder.id, folder.name);
         changed = true;
       }
     }
@@ -5189,8 +5365,7 @@ Future<void> bgUpdateCheck(String taskId, Map<String, dynamic>? params) async {
     }
     if (toInstall.isNotEmpty) {
       var tempObtArr = toInstall.where(
-        (element) =>
-            element.key == obtainiumId || element.key == '$obtainiumId.fdroid',
+        (element) => isObtainiumAppId(element.key),
       );
       if (tempObtArr.isNotEmpty) {
         // Move obtainium to the end of the list as it must always install last
