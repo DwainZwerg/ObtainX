@@ -331,7 +331,6 @@
     "parallelDownloads": "Parallele Downloads erlauben",
     "useShizuku": "Shizuku oder Sui zur Installation verwenden",
     "shizukuBinderNotFound": "Kompatibler Shizuku-Dienst wurde nicht gefunden",
-    "rootPretendToBeGooglePlay": "(Mittels Root) Google Play als Installationsquelle registrieren",
     "shizukuOld": "Veraltete Shizuku-Version (< 11) – bitte aktualisieren Sie sie",
     "shizukuOldAndroidWithADB": "Shizuku läuft auf Android < 8.1 mit ADB – aktualisieren Sie die Android-Version oder verwenden Sie stattdessen Sui",
     "shizukuPretendToBeGooglePlay": "(Mittels Shizuku) Google Play als Installationsquelle registrieren",
