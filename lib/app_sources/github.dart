@@ -438,12 +438,7 @@ class GitHub extends AppSource {
     String url, {
     bool forAPKDownload = false,
   }) async {
-    SettingsProvider settingsProvider = SettingsProvider();
-    await settingsProvider.initializeSettings();
-    var sourceConfig = await getSourceConfigValues(
-      additionalSettings,
-      settingsProvider,
-    );
+    var sourceConfig = await _reqSourceConfig(additionalSettings);
     var token = await getTokenIfAny(sourceConfig);
     var headers = <String, String>{};
     if (token != null && token.isNotEmpty) {
@@ -469,11 +464,31 @@ class GitHub extends AppSource {
     return tokenFromCreds(creds);
   }
 
+  // getSourceConfigValues needs an initialized SettingsProvider. The per-request
+  // hooks below (request headers, prefetch modifiers, update checks, search)
+  // each used to construct one and run initializeSettings() on every call.
+  // Initialize a single instance once and reuse it — reads go through the
+  // SharedPreferences singleton, so the values stay current.
+  static SettingsProvider? _reqSettingsProvider;
+  Future<SettingsProvider> _reqSettings() async {
+    var sp = _reqSettingsProvider;
+    if (sp == null) {
+      sp = SettingsProvider();
+      await sp.initializeSettings();
+      _reqSettingsProvider = sp;
+    }
+    return sp;
+  }
+
+  Future<Map<String, String>> _reqSourceConfig(
+    Map<String, dynamic> additionalSettings,
+  ) async {
+    return getSourceConfigValues(additionalSettings, await _reqSettings());
+  }
+
   @override
   Future<String?> getSourceNote() async {
-    final sp = SettingsProvider();
-    await sp.initializeSettings();
-    final sourceConfig = await getSourceConfigValues({}, sp);
+    final sourceConfig = await _reqSourceConfig({});
     if (!hostChanged && (await getTokenIfAny(sourceConfig)) == null) {
       return '${tr('githubSourceNote')} ${hostChanged ? tr('addInfoBelow') : tr('addInfoInSettings')}';
     }
@@ -486,12 +501,7 @@ class GitHub extends AppSource {
     String standardUrl,
     Map<String, dynamic> additionalSettings,
   ) async {
-    SettingsProvider settingsProvider = SettingsProvider();
-    await settingsProvider.initializeSettings();
-    var sourceConfig = await getSourceConfigValues(
-      additionalSettings,
-      settingsProvider,
-    );
+    var sourceConfig = await _reqSourceConfig(additionalSettings);
     var prefix = sourceConfig[githubReqPrefixKey] ?? '';
     if (prefix.isNotEmpty && !assetUrl.startsWith('https://$prefix/')) {
       return 'https://$prefix/$assetUrl';
@@ -504,12 +514,7 @@ class GitHub extends AppSource {
     String reqUrl,
     Map<String, dynamic> additionalSettings,
   ) async {
-    SettingsProvider settingsProvider = SettingsProvider();
-    await settingsProvider.initializeSettings();
-    var sourceConfig = await getSourceConfigValues(
-      additionalSettings,
-      settingsProvider,
-    );
+    var sourceConfig = await _reqSourceConfig(additionalSettings);
     if ((sourceConfig[githubReqPrefixKey] ?? '').isNotEmpty) {
       return 'https://${sourceConfig[githubReqPrefixKey]}/$reqUrl';
     }
@@ -698,8 +703,7 @@ class GitHub extends AppSource {
     Map<String, dynamic> additionalSettings, {
     Function(Response)? onHttpErrorCode,
   }) async {
-    SettingsProvider settingsProvider = SettingsProvider();
-    await settingsProvider.initializeSettings();
+    final settingsProvider = await _reqSettings();
     var sourceConfigSettingValues = await getSourceConfigValues(
       additionalSettings,
       settingsProvider,
@@ -1067,15 +1071,32 @@ class GitHub extends AppSource {
         }
       }
       final String? preferredAssetDigest = preferredAsset?['digest'] as String?;
-      final String? attestationStatus = shouldCheckAttestation
-          ? preferredAssetDigest != null
-                ? await getAttestationStatusForSha256Digest(
-                    standardUrl,
-                    preferredAssetDigest,
-                    additionalSettings,
-                  )
-                : githubAttestationStatusError
-          : null;
+      // Skip the attestation API round-trip when the upstream release is
+      // unchanged and we hold a CONCLUSIVE cached verdict. Unlike F-Droid's
+      // reproducible status (which flips no_data -> verified asynchronously
+      // after publish), a GitHub attestation is produced inside the release
+      // workflow run that builds the asset and bound to its digest, so for an
+      // unchanged release both 'verified' and 'unsupported' (no attestation for
+      // this digest) are stable. Only a cached 'error' is re-checked, since
+      // that is a transient lookup failure, not a real verdict.
+      final App? prevApp = previouslyCheckedApp;
+      final bool canReuseCachedAttestation =
+          prevApp != null &&
+          prevApp.rawLatestVersionFromSource != null &&
+          prevApp.rawLatestVersionFromSource == version &&
+          prevApp.latestAttestationStatus != null &&
+          prevApp.latestAttestationStatus != githubAttestationStatusError;
+      final String? attestationStatus = !shouldCheckAttestation
+          ? null
+          : canReuseCachedAttestation
+          ? prevApp.latestAttestationStatus
+          : preferredAssetDigest != null
+          ? await getAttestationStatusForSha256Digest(
+              standardUrl,
+              preferredAssetDigest,
+              additionalSettings,
+            )
+          : githubAttestationStatusError;
       return APKDetails(
         version,
         apkUrls,
@@ -1199,9 +1220,7 @@ class GitHub extends AppSource {
     String query, {
     Map<String, dynamic> querySettings = const {},
   }) async {
-    var sp = SettingsProvider();
-    await sp.initializeSettings();
-    var sourceConfigSettingValues = await getSourceConfigValues({}, sp);
+    var sourceConfigSettingValues = await _reqSourceConfig({});
     var results = await searchCommon(
       query,
       '${await getAPIHost({})}/search/repositories?q=${Uri.encodeQueryComponent(query)}&per_page=100',
