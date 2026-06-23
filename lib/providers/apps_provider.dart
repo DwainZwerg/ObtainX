@@ -1493,6 +1493,15 @@ class AppsProvider with ChangeNotifier {
   // in the app. Skip a foreground reload if one completed recently.
   static const Duration _foregroundLoadCooldown = Duration(seconds: 5);
   DateTime? _lastForegroundLoadAt;
+
+  // Watermark for [loadApps]' incremental JSON parse. A full load (singleId ==
+  // null) stamps this with the time the load started. On a subsequent full
+  // load, any app JSON whose file mtime predates the watermark is reused from
+  // memory instead of being re-read + re-decoded — so a foreground resume with
+  // a large library doesn't re-run hundreds of synchronous jsonDecode /
+  // App.fromJson calls on the UI isolate. Files written since the watermark
+  // (e.g. by the background update task) advance their mtime and are re-parsed.
+  DateTime? _lastFullDiskLoadAt;
   late Directory apkDir;
   late Directory iconsCacheDir;
 
@@ -2133,8 +2142,18 @@ class AppsProvider with ChangeNotifier {
   Future<bool> _chunkedCopyApkToSafTree(
     File source,
     Uri treeUri,
-    String displayName,
-  ) async {
+    String displayName, {
+    String? mimeType,
+  }) async {
+    final String resolvedMime =
+        mimeType ??
+        (displayName.toLowerCase().endsWith('.apk')
+            ? 'application/vnd.android.package-archive'
+            : (displayName.toLowerCase().endsWith('.zip')
+                  ? 'application/zip'
+                  : (displayName.toLowerCase().endsWith('.json')
+                        ? 'application/json'
+                        : '*/*')));
     final dynamic existing = await saf.findFile(treeUri, displayName);
     if (existing != null) {
       final Uri? existingUri = existing is Map
@@ -2151,7 +2170,7 @@ class AppsProvider with ChangeNotifier {
       if (isFirstChunk) {
         final dynamic created = await saf.createFile(
           treeUri,
-          mimeType: 'application/vnd.android.package-archive',
+          mimeType: resolvedMime,
           displayName: displayName,
           bytes: bytes,
         );
@@ -2171,7 +2190,7 @@ class AppsProvider with ChangeNotifier {
     if (isFirstChunk) {
       final dynamic created = await saf.createFile(
         treeUri,
-        mimeType: 'application/vnd.android.package-archive',
+        mimeType: resolvedMime,
         displayName: displayName,
         bytes: Uint8List(0),
       );
@@ -2893,33 +2912,33 @@ class AppsProvider with ChangeNotifier {
 
         if (downloadedFile != null) {
           if (needBGWorkaround) {
-            // ignore: use_build_context_synchronously
             installApk(
               downloadedFile,
+              // ignore: use_build_context_synchronously
               contextIfNewInstall,
               needsBGWorkaround: true,
               shizukuPretendToBeGooglePlay: shizukuPretendToBeGooglePlay,
             );
           } else {
-            // ignore: use_build_context_synchronously
             sayInstalled = await installApk(
               downloadedFile,
+              // ignore: use_build_context_synchronously
               contextIfNewInstall,
               shizukuPretendToBeGooglePlay: shizukuPretendToBeGooglePlay,
             );
           }
         } else {
           if (needBGWorkaround) {
-            // ignore: use_build_context_synchronously
             installApkDir(
               downloadedDir!,
+              // ignore: use_build_context_synchronously
               contextIfNewInstall,
               needsBGWorkaround: true,
             );
           } else {
-            // ignore: use_build_context_synchronously
             sayInstalled = await installApkDir(
               downloadedDir!,
+              // ignore: use_build_context_synchronously
               contextIfNewInstall,
               shizukuPretendToBeGooglePlay: shizukuPretendToBeGooglePlay,
             );
@@ -3174,10 +3193,23 @@ class AppsProvider with ChangeNotifier {
 
     Future<void> downloadFn(MapEntry<String, String> fileUrl, App app) async {
       try {
-        String downloadPath = '${await getStorageRootPath()}/Download';
-        await downloadFile(
+        final Uri? apkSaveTreeUri = await settingsProvider.getApkSaveDir(
+          warnIfInaccessible: true,
+        );
+
+        final String downloadPath;
+        final String fileName;
+        if (apkSaveTreeUri != null) {
+          downloadPath = apkDir.path;
+          fileName = 'temp_manual_${app.id}_${fileUrl.hashCode}';
+        } else {
+          downloadPath = '${await getStorageRootPath()}/Download';
+          fileName = sanitizeApkSaveDisplayName(fileUrl.key);
+        }
+
+        final File downloadedFile = await downloadFile(
           fileUrl.value,
-          sanitizeApkSaveDisplayName(fileUrl.key),
+          fileName,
           true,
           (double? progress) {
             notificationsProvider.notify(
@@ -3196,6 +3228,27 @@ class AppsProvider with ChangeNotifier {
           allowInsecure: app.additionalSettings['allowInsecure'] == true,
           logs: logs,
         );
+
+        if (apkSaveTreeUri != null) {
+          try {
+            final String targetName = sanitizeApkSaveDisplayName(fileUrl.key);
+            final bool copied = await _chunkedCopyApkToSafTree(
+              downloadedFile,
+              apkSaveTreeUri,
+              targetName,
+            );
+            if (!copied) {
+              throw ObtainiumError(tr('apkSaveFolderCopyFailed'));
+            }
+          } finally {
+            if (downloadedFile.existsSync()) {
+              try {
+                downloadedFile.deleteSync();
+              } catch (_) {}
+            }
+          }
+        }
+
         notificationsProvider.notify(
           DownloadedNotification(fileUrl.key, fileUrl.value),
         );
@@ -3237,7 +3290,9 @@ class AppsProvider with ChangeNotifier {
     if (app?.app == null) {
       return false;
     }
-    var source = SourceProvider().getSource(
+    // Read-only (type checks only) — use the template to avoid a per-call
+    // source construction.
+    var source = SourceProvider().getSourceTemplate(
       app!.app.url,
       overrideSource: app.app.overrideSource,
     );
@@ -3249,11 +3304,11 @@ class AppsProvider with ChangeNotifier {
         ? app.installedInfo?.versionCode.toString()
         : app.installedInfo?.versionName;
     bool isHTMLWithNoVersionDetection =
-        (source.runtimeType == HTML().runtimeType &&
+        (source is HTML &&
         (app.app.additionalSettings['versionExtractionRegEx'] as String?)
                 ?.isNotEmpty !=
             true);
-    bool isDirectAPKLink = source.runtimeType == DirectAPKLink().runtimeType;
+    bool isDirectAPKLink = source is DirectAPKLink;
     final bool hasCommitSha =
         realInstalledVersion != null &&
         (_commitHashLikeTokensFromVersion(realInstalledVersion).isNotEmpty ||
@@ -3309,9 +3364,10 @@ class AppsProvider with ChangeNotifier {
         app.additionalSettings['versionDetection'] == null;
     var naiveStandardVersionDetection =
         app.additionalSettings['naiveStandardVersionDetection'] == true ||
-        SourceProvider()
-            .getSource(app.url, overrideSource: app.overrideSource)
-            .naiveStandardVersionDetection;
+        SourceProvider().naiveStandardVersionDetectionForUrl(
+          app.url,
+          overrideSource: app.overrideSource,
+        );
     String? realInstalledVersion =
         app.additionalSettings['useVersionCodeAsOSVersion'] == true
         ? installedInfo?.versionCode.toString()
@@ -3459,35 +3515,93 @@ class AppsProvider with ChangeNotifier {
     await _purgeStalePendingRemovalFilesWithoutLiveDeferral();
     var sp = SourceProvider();
     List<List<String>> errors = [];
-    var installedAppsData = await getAllInstalledInfo(
-      light: lightInstalledInfoFetch,
-    );
+    // Always use the light (no signing-cert) flags. The load/reconcile path
+    // only needs versionName / versionCode / lastUpdateTime via
+    // getCorrectedInstallStatusAppIfPossible; enumerating signing certificates
+    // for every device package is ~10× more expensive and nothing in this path
+    // consumes them (cert hashes, if ever needed, are fetched on demand). The
+    // [lightInstalledInfoFetch] param is retained for call-site compatibility
+    // but no longer changes the flags. This keeps the cold start from stalling
+    // on the single most expensive PackageManager call.
+    var installedAppsData = await getAllInstalledInfo(light: true);
+    // Index the device's installed packages once. The previous per-app
+    // `firstWhere` was an O(tracked × installed) scan on the UI isolate.
+    final Map<String, PackageInfo> installedInfoByPackage = {
+      for (final info in installedAppsData)
+        if (info.packageName != null) info.packageName!: info,
+    };
     List<String> removedAppIds = [];
     bool anyAppModded = false;
-    await Future.wait(
-      (await (await getAppsDir()).list().toList()) // Parse Apps from JSON
-          .map((item) async {
-            App? app;
-            if (item.path.toLowerCase().endsWith('.json') &&
-                (singleId == null ||
-                    item.path.split('/').last.toLowerCase() ==
-                        '${singleId.toLowerCase()}.json')) {
-              try {
-                app = App.fromJson(
-                  jsonDecode(await File(item.path).readAsString()),
+    final DateTime? reuseWatermark = singleId == null
+        ? _lastFullDiskLoadAt
+        : null;
+    final DateTime diskLoadStartedAt = DateTime.now();
+    final List<FileSystemEntity> appDirItems = await (await getAppsDir())
+        .list()
+        .toList(); // Parse Apps from JSON
+    // Parse in bounded chunks, yielding to the event loop between each so the UI
+    // isolate can paint a frame and process touches during a large cold load.
+    // (Incremental reuse already keeps resumes cheap; this targets first launch.)
+    const int loadChunkSize = 16;
+    for (
+      int chunkStart = 0;
+      chunkStart < appDirItems.length;
+      chunkStart += loadChunkSize
+    ) {
+      final int chunkEnd = (chunkStart + loadChunkSize) < appDirItems.length
+          ? chunkStart + loadChunkSize
+          : appDirItems.length;
+      await Future.wait(
+        appDirItems.sublist(chunkStart, chunkEnd).map((item) async {
+          if (!item.path.toLowerCase().endsWith('.json')) return;
+          final String fileName = item.path.split('/').last;
+          if (singleId != null &&
+              fileName.toLowerCase() != '${singleId.toLowerCase()}.json') {
+            return;
+          }
+          // App JSON files are named `${app.id}.json`, so the id can be
+          // recovered from the filename without reading the file.
+          final String idFromFile = fileName.substring(
+            0,
+            fileName.length - '.json'.length,
+          );
+          App? app;
+          bool reused = false;
+          // Incremental parse: reuse the in-memory app when its JSON file
+          // has not changed since the last full load. Skips both the file
+          // read and the synchronous decode. stat() runs on the dart:io
+          // thread pool, off the UI isolate; the cold start (no watermark)
+          // skips stat entirely and parses everything.
+          final AppInMemory? existing = apps[idFromFile];
+          if (existing != null && reuseWatermark != null) {
+            try {
+              final FileStat stat = await item.stat();
+              if (stat.modified.isBefore(reuseWatermark)) {
+                app = existing.app;
+                reused = true;
+              }
+            } catch (_) {
+              // stat failed — fall through to a normal parse.
+            }
+          }
+          if (!reused) {
+            try {
+              app = App.fromJson(
+                jsonDecode(await File(item.path).readAsString()),
+              );
+            } catch (err) {
+              if (err is FormatException) {
+                logs.add(
+                  'Corrupt JSON when loading App (will be ignored): $err',
                 );
-              } catch (err) {
-                if (err is FormatException) {
-                  logs.add(
-                    'Corrupt JSON when loading App (will be ignored): $err',
-                  );
-                  await item.rename('${item.path}.corrupt');
-                } else {
-                  rethrow;
-                }
+                await item.rename('${item.path}.corrupt');
+              } else {
+                rethrow;
               }
             }
-            if (app != null) {
+          }
+          if (app != null) {
+            if (!reused) {
               // Save the app to the in-memory list without grabbing any OS info first
               apps.update(
                 app.id,
@@ -3499,48 +3613,56 @@ class AppsProvider with ChangeNotifier {
                 ),
                 ifAbsent: () => AppInMemory(app!, null, null, null),
               );
-              try {
-                // Try getting the app's source to ensure no invalid apps get loaded
-                sp.getSource(app.url, overrideSource: app.overrideSource);
-                // If the app is installed, grab its OS data and reconcile install statuses
-                PackageInfo? installedInfo;
-                try {
-                  installedInfo = installedAppsData.firstWhere(
-                    (i) => i.packageName == app!.id,
-                  );
-                } catch (e) {
-                  // If the app isn't installed the above throws an error
-                }
-                // Reconcile differences between the installed and recorded install info
-                var moddedApp = getCorrectedInstallStatusAppIfPossible(
-                  app,
-                  installedInfo,
-                );
-                if (moddedApp != null) {
-                  app = moddedApp;
-                  anyAppModded = true;
-                  // Note the app ID if it was uninstalled externally
-                  if (moddedApp.installedVersion == null) {
-                    removedAppIds.add(moddedApp.id);
-                  }
-                }
-                // Update the app in memory with install info and corrections
-                apps.update(
-                  app.id,
-                  (value) => AppInMemory(
-                    app!,
-                    value.downloadProgress,
-                    installedInfo,
-                    value.icon,
-                  ),
-                  ifAbsent: () => AppInMemory(app!, null, installedInfo, null),
-                );
-              } catch (e) {
-                errors.add([app!.id, app.finalName, e.toString()]);
-              }
             }
-          }),
-    );
+            try {
+              // Validate the app's source resolves (no invalid apps loaded).
+              // Read-only — use the template to avoid constructing a source per
+              // app on load.
+              sp.getSourceTemplate(app.url, overrideSource: app.overrideSource);
+              // Reconcile install status against the device package list.
+              // This runs even for reused apps: the JSON may be unchanged
+              // while the package was installed/uninstalled/updated
+              // externally since the last load.
+              final PackageInfo? installedInfo = installedInfoByPackage[app.id];
+              var moddedApp = getCorrectedInstallStatusAppIfPossible(
+                app,
+                installedInfo,
+              );
+              if (moddedApp != null) {
+                app = moddedApp;
+                anyAppModded = true;
+                // Note the app ID if it was uninstalled externally
+                if (moddedApp.installedVersion == null) {
+                  removedAppIds.add(moddedApp.id);
+                }
+              }
+              // Update the app in memory with install info and corrections
+              apps.update(
+                app.id,
+                (value) => AppInMemory(
+                  app!,
+                  value.downloadProgress,
+                  installedInfo,
+                  value.icon,
+                ),
+                ifAbsent: () => AppInMemory(app!, null, installedInfo, null),
+              );
+            } catch (e) {
+              errors.add([app!.id, app.finalName, e.toString()]);
+            }
+          }
+        }),
+      );
+      if (singleId == null && chunkEnd < appDirItems.length) {
+        // Let the UI isolate breathe between chunks of a large cold load.
+        await Future.delayed(Duration.zero);
+      }
+    }
+    // Stamp the watermark only after a full load completed its parse pass, so
+    // the next full load can reuse everything that hasn't changed since.
+    if (singleId == null) {
+      _lastFullDiskLoadAt = diskLoadStartedAt;
+    }
     if (errors.isNotEmpty) {
       removeApps(errors.map((e) => e[0]).toList());
       NotificationsProvider().notify(
@@ -3682,6 +3804,33 @@ class AppsProvider with ChangeNotifier {
     }
   }
 
+  /// Fetches the installed app's launcher icon via the platform channel,
+  /// tolerating a missing package. When [PackageManager.getAppIcon] is called
+  /// for an app whose package is no longer resolvable (e.g. uninstalled for the
+  /// current user, or a track-only app that was never installed), the JNI hop
+  /// throws `NameNotFoundException`. Previously this surfaced as an uncaught
+  /// Dart error on every row warm. Here we swallow it, drop the stale
+  /// [AppInMemory.installedInfo] so the dead lookup isn't retried, and let the
+  /// caller fall back to the app's [App.iconUrl].
+  Future<Uint8List?> _getInstalledAppIconSafely(String appId) async {
+    final applicationInfo = apps[appId]?.installedInfo?.applicationInfo;
+    if (applicationInfo == null) return null;
+    try {
+      return await applicationInfo.getAppIcon();
+    } catch (e) {
+      logs.add('App icon unavailable for $appId (clearing stale info): $e');
+      final AppInMemory? existing = apps[appId];
+      if (existing != null && existing.installedInfo != null) {
+        apps.update(
+          appId,
+          (value) =>
+              AppInMemory(value.app, value.downloadProgress, null, value.icon),
+        );
+      }
+      return null;
+    }
+  }
+
   Future<void> updateAppIcon(String? appId, {bool ignoreCache = false}) async {
     if (appId == null || apps[appId] == null) return;
 
@@ -3720,9 +3869,12 @@ class AppsProvider with ChangeNotifier {
       await cachedIcon.delete();
     }
     var alreadyCached = cachedIcon.existsSync() && !ignoreCache;
-    Uint8List? icon = alreadyCached
-        ? await cachedIcon.readAsBytes()
-        : await apps[appId]!.installedInfo?.applicationInfo?.getAppIcon();
+    Uint8List? icon;
+    if (alreadyCached) {
+      icon = await cachedIcon.readAsBytes();
+    } else {
+      icon = await _getInstalledAppIconSafely(appId);
+    }
     if (icon == null && !alreadyCached) {
       final url = apps[appId]!.app.iconUrl;
       if (url != null && url.isNotEmpty) {
@@ -3789,8 +3941,7 @@ class AppsProvider with ChangeNotifier {
         logs.add('loadIconPreviewExcludingUserOverride cache: $e');
       }
     }
-    Uint8List? icon = await apps[appId]!.installedInfo?.applicationInfo
-        ?.getAppIcon();
+    Uint8List? icon = await _getInstalledAppIconSafely(appId);
     if (icon == null) {
       final String? url = apps[appId]!.app.iconUrl;
       if (url != null && url.isNotEmpty) {
@@ -3867,6 +4018,14 @@ class AppsProvider with ChangeNotifier {
     bool notifyListenersAfterSave = true,
     bool autoExportAfterSave = true,
     bool updateInstalledInfo = true,
+    // When provided, install info is read from this device-package snapshot
+    // instead of a per-app getInstalledInfo() call. getInstalledInfo()
+    // enumerates ALL installed packages on every call, so for a bulk save (e.g.
+    // an update-check scan of hundreds of apps) the caller should enumerate
+    // once and pass the map here to avoid O(apps × devicePackages) work. The
+    // map still carries the current device versions, so external-update
+    // detection is preserved.
+    Map<String, PackageInfo>? prefetchedInstalledInfo,
   }) async {
     attemptToCorrectInstallStatus = attemptToCorrectInstallStatus;
     if (!updateInstalledInfo) {
@@ -3919,12 +4078,14 @@ class AppsProvider with ChangeNotifier {
             app.name = cachedInMemory.app.name;
           }
         } else {
-          info = await getInstalledInfo(app.id);
+          info = prefetchedInstalledInfo != null
+              ? prefetchedInstalledInfo[app.id]
+              : await getInstalledInfo(app.id);
           // Reuse the cached icon whenever the installed package
           // hasn't changed since the last save. [getAppIcon] returns large PNG
-          // bytes via a JNI hop. We still call [getInstalledInfo]
-          // unconditionally because it is cheap and we need the current
-          // versionName to detect external uninstalls / updates.
+          // bytes via a JNI hop. The current versionName (from the prefetched
+          // snapshot or a fresh lookup) is what lets us detect external
+          // uninstalls / updates.
           final bool installedUnchanged =
               cachedInMemory != null &&
               cachedInMemory.installedInfo?.packageName == info?.packageName &&
@@ -3933,14 +4094,23 @@ class AppsProvider with ChangeNotifier {
           if (installedUnchanged) {
             icon = cachedInMemory.icon;
           } else {
-            icon = await info?.applicationInfo?.getAppIcon();
+            try {
+              // getAppIcon() is a JNI hop that throws NameNotFoundException if
+              // the package vanished between getInstalledInfo() and here.
+              icon = await info?.applicationInfo?.getAppIcon();
+            } catch (e) {
+              logs.add('App icon unavailable while saving ${app.id}: $e');
+              icon = null;
+            }
             String? localizedLabel;
             if (Platform.isAndroid && info != null) {
               final labelsByPackageName =
                   await BulkImportService.getApplicationLabels([app.id]);
               localizedLabel = labelsByPackageName[app.id]?.trim();
               if (localizedLabel?.isNotEmpty != true) {
-                info = await getInstalledInfo(app.id);
+                info = prefetchedInstalledInfo != null
+                    ? prefetchedInstalledInfo[app.id]
+                    : await getInstalledInfo(app.id);
               }
             }
             final String? appLabel = localizedLabel?.isNotEmpty == true
@@ -4303,6 +4473,7 @@ class AppsProvider with ChangeNotifier {
     String appId, {
     bool notifyListenersAfterSave = true,
     bool autoExportAfterSave = true,
+    Map<String, PackageInfo>? prefetchedInstalledInfo,
   }) async {
     App? currentApp = apps[appId]!.app;
     // Pause update checks until the user resolves a pending repo rename.
@@ -4353,6 +4524,7 @@ class AppsProvider with ChangeNotifier {
       [appToSave],
       notifyListenersAfterSave: notifyListenersAfterSave,
       autoExportAfterSave: autoExportAfterSave,
+      prefetchedInstalledInfo: prefetchedInstalledInfo,
     );
     if (apkMirrorSizeDebug && currentApp.url.contains('apkmirror.com')) {
       final App? savedApp = apps[appId]?.app;
@@ -4458,6 +4630,17 @@ class AppsProvider with ChangeNotifier {
         final workerCount = appIds.length < maxParallelUpdateChecks
             ? appIds.length
             : maxParallelUpdateChecks;
+        // Enumerate installed packages ONCE for the whole scan. Each per-app
+        // saveApps would otherwise call getInstalledInfo(), which re-enumerates
+        // every device package — O(apps × devicePackages). The snapshot still
+        // holds current device versions, so external updates are still detected.
+        final List<PackageInfo> allInstalledForScan = await getAllInstalledInfo(
+          light: true,
+        );
+        final Map<String, PackageInfo> prefetchedInstalledInfo = {
+          for (final info in allInstalledForScan)
+            if (info.packageName != null) info.packageName!: info,
+        };
 
         Future<void> runUpdateCheckWorker() async {
           while (true) {
@@ -4473,6 +4656,7 @@ class AppsProvider with ChangeNotifier {
                 appId,
                 notifyListenersAfterSave: false,
                 autoExportAfterSave: false,
+                prefetchedInstalledInfo: prefetchedInstalledInfo,
               );
               appSaveCompleted = true;
               final now = DateTime.now();
@@ -4577,10 +4761,12 @@ class AppsProvider with ChangeNotifier {
         })
         .map((e) {
           final appJson = e.app.toJson();
-          final Map<String, dynamic> additionalSettings = Map<String, dynamic>.from(
-            jsonDecode(appJson['additionalSettings'] as String),
-          );
-          final List<dynamic>? folderIds = additionalSettings['folderIds'] as List?;
+          final Map<String, dynamic> additionalSettings =
+              Map<String, dynamic>.from(
+                jsonDecode(appJson['additionalSettings'] as String),
+              );
+          final List<dynamic>? folderIds =
+              additionalSettings['folderIds'] as List?;
           if (folderIds != null && folderIds.isNotEmpty) {
             final Map<String, String> folderNames = {};
             final existingFolders = exportSettingsProvider.appFolders;
@@ -4742,15 +4928,21 @@ class AppsProvider with ChangeNotifier {
             .map((e) => App.fromJson(e))
             .toList();
 
-    final List<AppFolder> existingFolders = List<AppFolder>.from(settingsProvider.appFolders);
+    final List<AppFolder> existingFolders = List<AppFolder>.from(
+      settingsProvider.appFolders,
+    );
     final Map<String, String> backupIdToTargetId = {};
     final List<AppFolder> foldersToCreate = [];
 
     // Parse backup folders from settings if they exist
     final Map<String, String> backupFolderIdToName = {};
-    if (newFormat && decodedJSON['settings'] != null && decodedJSON['settings']['appFolders'] != null) {
+    if (newFormat &&
+        decodedJSON['settings'] != null &&
+        decodedJSON['settings']['appFolders'] != null) {
       try {
-        final list = jsonDecode(decodedJSON['settings']['appFolders'] as String) as List<dynamic>;
+        final list =
+            jsonDecode(decodedJSON['settings']['appFolders'] as String)
+                as List<dynamic>;
         for (var e in list) {
           final folder = AppFolder.fromJson(e as Map<String, dynamic>);
           backupFolderIdToName[folder.id] = folder.name;
@@ -4760,7 +4952,8 @@ class AppsProvider with ChangeNotifier {
 
     // Gather folder names from imported apps' folderNames map
     for (final app in importedApps) {
-      final Map<dynamic, dynamic>? appFolderNames = app.additionalSettings['folderNames'] as Map?;
+      final Map<dynamic, dynamic>? appFolderNames =
+          app.additionalSettings['folderNames'] as Map?;
       if (appFolderNames != null) {
         appFolderNames.forEach((key, val) {
           if (key is String && val is String) {
@@ -4798,7 +4991,7 @@ class AppsProvider with ChangeNotifier {
     for (final app in importedApps) {
       final folderIds = folderIdsForApp(app);
       final Map<String, dynamic> updatedFolderNames = {};
-      
+
       if (folderIds.isNotEmpty) {
         final List<String> updatedFolderIds = [];
         for (final id in folderIds) {
@@ -4825,7 +5018,7 @@ class AppsProvider with ChangeNotifier {
         }
         app.additionalSettings['folderIds'] = updatedFolderIds;
       }
-      
+
       final excludedFolderIds = excludedFolderIdsForApp(app);
       if (excludedFolderIds.isNotEmpty) {
         final List<String> updatedExcludedIds = [];
@@ -4861,7 +5054,10 @@ class AppsProvider with ChangeNotifier {
     if (newFormat && decodedJSON['settings'] != null) {
       var settingsMap = decodedJSON['settings'] as Map<String, Object?>;
       settingsMap.forEach((key, value) {
-        if (key == 'appFolders') return; // Skip folder settings as we already merged/saved them
+        if (key == 'appFolders') {
+          // Skip folder settings as we already merged/saved them
+          return;
+        }
         if (value is int) {
           settingsProvider.prefs?.setInt(key, value);
         } else if (value is double) {
